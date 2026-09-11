@@ -60,6 +60,7 @@ share tokens, private file contents, raw prompts containing credentials, or unbo
 - No arbitrary MCP server URLs. Hugging Face MCP support may be added as a separate, explicitly
   configured resource after endpoint and tool allowlisting; it must not be inferred from a repo URL.
 - No unrestricted file download or model-weight transfer through agent RPC.
+- No Hugging Face bucket or object-storage access, bucket enumeration, or storage credentials.
 - Provider selection is fixed by the connection or an allowlist; arbitrary provider routing is off.
 - Webhook support is deferred until signature verification, replay protection, and event scoping are
   designed.
