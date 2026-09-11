@@ -25,6 +25,30 @@ Planned entries:
 | `mcp` | upstream `gatekeeper-mcp` | User-supplied endpoint |
 | `mcpPortal` | upstream `gatekeeper-mcp-portal` | Admin-configured portal |
 | `snowflake` | outer `packages/gatekeeper-snowflake` (to be created) | Snowflake-scoped credentials |
+| `huggingface` | outer `packages/gatekeeper-huggingface` | Fine-grained Hub token / OAuth |
+
+## Unified implementation plan
+
+All integrations use the same Gatekeeper contract and are implemented in the outer Starter
+repository. Each connector must provide a scoped resource URL, configurator, bounded observations,
+approval-gated writes, simulation, idempotency, and observer verification before enablement.
+
+- GitHub: repository/branch-scoped source reads, diffs, issues, pull-request proposals, and approved
+  commits/pushes. No organization administration or unrestricted repository access.
+- Confluence: site/space/page-scoped reads and approved page updates. No tenant-wide administration.
+- Cloudflare: account/resource-scoped Workers, KV, R2, and observability operations. No account-wide
+  token handling, billing, or unrestricted destructive actions.
+- MCP: explicitly configured endpoint with normalized URL, tool allowlist, bounded results, and
+  poisoning/shadowing defenses. No arbitrary endpoint discovery.
+- MCP Portal: admin-selected portal only, with reviewed tools and authentication mode. No implicit
+  portal trust.
+- Snowflake: moderate Cortex/MCP and SQL capabilities with explicit role/database/schema/table
+  scopes, approval-gated mutations, and recursion protection.
+- Hugging Face: model/dataset/Space-scoped Hub access, bounded inference, and approval-gated
+  repository/Space changes. No bucket or object-storage access.
+
+AI Gateway model testing remains a separate path for Hugging Face inference and does not alter the
+Think agent's model configuration.
 
 No secret belongs in `deployment.jsonc`. OAuth client credentials, MCP tokens, and Snowflake
 credentials will be installed through Wrangler secret/configuration flows after the corresponding
