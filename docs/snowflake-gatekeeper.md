@@ -31,6 +31,13 @@ tool, and placing direct SQL behind a separate MCP server and least-privilege
 role because direct SQL can bypass the Agent's semantic views and orchestration.
 That recommendation is retained here even though the profile is moderate.
 
+Cortex Agent calls use the Snowflake `agent:run` API with an explicitly granted
+agent object and bounded thread/run identifiers. The connection role must have
+the required Cortex user/agent role, privilege on the agent object, and access
+to every configured tool resource. Agent orchestration budgets and per-user
+quotas are deployment limits, not model instructions. See the [Cortex Agents
+documentation](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-agents).
+
 ## Resource scopes
 
 Every connection URL carries a concrete capability grant rather than an
