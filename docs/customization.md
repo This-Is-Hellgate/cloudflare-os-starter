@@ -204,6 +204,30 @@ Read the [package guide](../packages/custom-gatekeeper/README.md) and upstream [
 
 Prefer wrapper-owned Workers and [service bindings](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/) over patches inside the submodule. Modify upstream only when a Worker boundary cannot express the behavior, and keep the change as a reviewable upstream commit or fork rather than a generated overlay.
 
+## Optional upstream Gatekeepers
+
+The following integrations are upstream packages, not wrapper-owned Workers. To enable one in a
+deployment, the outer Starter must add its package to the deployment manifest, build it, deploy it,
+and add two service bindings: one on the Workshop using the package's `GatekeeperVendor` entrypoint,
+and one on the Router for `/gatekeeper/<id>` HTTP traffic. Keep each package's Worker name unique.
+The table records the configuration boundary; secret values belong in Wrangler secrets, never in
+`deployment.jsonc`.
+
+| Integration | Suggested Worker name | Credentials / vars | Workshop binding | Public route | Package dependencies |
+| --- | --- | --- | --- | --- | --- |
+| GitHub | `gatekeeper-github` | `CLIENT_ID`, `CLIENT_SECRET` secrets; `BASE_URL` = `https://<router-host>/gatekeeper/github` | `GATEKEEPER_GITHUB` | OAuth callback `/gatekeeper/github/oauth` | `backend-utils`, `gatekeeper-kit`, `workshop-shared`, `capnweb`, `capnweb-validate` |
+| Confluence | `gatekeeper-confluence` | `CLIENT_ID`, `CLIENT_SECRET` secrets; `BASE_URL` = `https://<router-host>/gatekeeper/confluence` | `GATEKEEPER_CONFLUENCE` | OAuth callback `/gatekeeper/confluence/oauth` | `backend-utils`, `gatekeeper-kit`, `typed-storage`, `workshop-shared`, `capnweb`, `capnweb-validate` |
+| Cloudflare | `gatekeeper-cloudflare` | `CLIENT_ID`, `CLIENT_SECRET` secrets; `BASE_URL` = `https://<router-host>/gatekeeper/cloudflare` | `GATEKEEPER_CLOUDFLARE` | OAuth callback `/gatekeeper/cloudflare/oauth` | `backend-utils`, `gatekeeper-kit`, `workshop-shared`, `capnweb`, `capnweb-validate` |
+| MCP server | `gatekeeper-mcp` | `MCP_CLIENT_NAME`, optional `BASE_URL`; keep `MCP_ALLOW_INSECURE=false` in production | `GATEKEEPER_MCP` | `/gatekeeper/mcp/*` for connect/OAuth flows | `backend-utils`, `gatekeeper-kit`, `mcp-shared`, `workshop-shared`, `@modelcontextprotocol/client`, `capnweb`, `capnweb-validate` |
+| MCP Portal | `gatekeeper-mcp-portal` | `MCP_PORTAL_URL`, `MCP_PORTAL_NAME`, `MCP_PORTAL_AUTH`; optional `MCP_PORTAL_TOKEN` secret and hidden-server list; keep `MCP_ALLOW_INSECURE=false` | `GATEKEEPER_MCP_PORTAL` | `/gatekeeper/mcp-portal/*` for portal OAuth flows | `backend-utils`, `gatekeeper-kit`, `mcp-shared`, `workshop-shared`, `@modelcontextprotocol/client`, `capnweb`, `capnweb-validate` |
+
+These bindings are capability grants, not merely routing aliases. The Router binding exposes the
+HTTP connect flow; the Workshop binding exposes the RPC vendor. A package may build without
+credentials, but OAuth connectors remain unavailable until their secrets and callback URL are
+configured. MCP Portal is intentionally hidden when `MCP_PORTAL_URL` is unset. A custom integration
+such as Snowflake should follow this outer-repository pattern and use `gatekeeper-kit` for credential
+fencing, observations, action approval, and simulation.
+
 ## Upgrade
 
 1. Record the current `cloudflare-os` gitlink for rollback.
