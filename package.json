@@ -13,7 +13,8 @@
     "lint:check": "vp lint",
     "lint:fix": "vp lint --fix",
     "lint": "pnpm run lint:check && pnpm run types:scripts && pnpm run build",
-    "check": "node scripts/deploy.ts --check",
+    "check:boundary": "node scripts/boundary-check.ts",
+    "check": "pnpm check:boundary && node scripts/deploy.ts --check",
     "deploy": "node scripts/deploy.ts"
   },
   "devDependencies": {
