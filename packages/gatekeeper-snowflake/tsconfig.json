@@ -1,0 +1,1 @@
+{"extends":"../../cloudflare-os/tsconfig.json","compilerOptions":{"target":"ES2022","lib":["ESNext"],"module":"ESNext","moduleResolution":"bundler","types":["./worker-configuration.d.ts"],"noEmit":true,"paths":{"@gadgets/workshop-shared/*":["../../cloudflare-os/packages/workshop-shared/src/*"]}},"include":["src"],"exclude":["node_modules","dist"]}

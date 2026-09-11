@@ -171,6 +171,14 @@ export interface CustomToolResult {
   truncated: boolean;
 }
 
+export interface SnowflakeWriteProposal {
+  proposalId: string;
+  operation: "insert" | "update" | "merge";
+  target: string;
+  sql: string;
+  simulated: boolean;
+}
+
 export interface SnowflakeSession {
   /** Return only the account identity and effective role, never credentials. */
   getAccount(): Promise<SnowflakeAccount>;
@@ -194,4 +202,6 @@ export interface SnowflakeSession {
    * not execute until the required approval has been granted.
    */
   runCustomTool(request: CustomToolRequest): Promise<CustomToolResult>;
+  /** Queue a bounded DML proposal; it is never sent to Snowflake during this call. */
+  proposeWrite(operation: "insert" | "update" | "merge", target: string, sql: string): Promise<SnowflakeWriteProposal>;
 }
