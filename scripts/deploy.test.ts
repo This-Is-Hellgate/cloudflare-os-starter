@@ -28,6 +28,7 @@ const validConfig: DeploymentConfig = {
     mcp: { enabled: false, workerName: null },
     mcpPortal: { enabled: false, workerName: null },
     snowflake: { enabled: false, workerName: null },
+    huggingface: { enabled: false, workerName: null },
   },
   access: {
     issuer: "https://acme.cloudflareaccess.com",

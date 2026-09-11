@@ -44,7 +44,8 @@
     "cloudflare": { "enabled": false, "workerName": null },
     "mcp": { "enabled": false, "workerName": null },
     "mcpPortal": { "enabled": false, "workerName": null },
-    "snowflake": { "enabled": false, "workerName": null }
+    "snowflake": { "enabled": false, "workerName": null },
+    "huggingface": { "enabled": false, "workerName": null }
   },
 
   // This starter deploys Cloudflare Access mode. Cloudflare OS also supports built-in password

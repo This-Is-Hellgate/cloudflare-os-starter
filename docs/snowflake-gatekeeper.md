@@ -1,8 +1,10 @@
 # Snowflake Gatekeeper: moderate capability profile
 
-This document is the design boundary for a future Snowflake Gatekeeper. It is
-documentation only: it does not create a Worker, enable a binding, or grant
-Snowflake privileges. Implementation must follow the outer repository's
+This document is the design boundary for the Snowflake Gatekeeper. The connector is implemented
+in this starter (`packages/gatekeeper-snowflake`) and listed in the optional-Gatekeeper catalog
+(`scripts/deployment-config.ts`), but the first milestone does not deploy it: enabling it in
+`deployment.jsonc` validates only — the deployment generator does not yet emit its Worker config,
+bindings, or secret wiring. Implementation must follow the outer repository's
 [`write-gatekeeper` guidance](customization.md#custom-gatekeepers) and the
 reviewed `@gadgets/gatekeeper-kit` leaves.
 

@@ -24,8 +24,8 @@ Planned entries:
 | `cloudflare` | upstream `gatekeeper-cloudflare` | OAuth 2.0 |
 | `mcp` | upstream `gatekeeper-mcp` | User-supplied endpoint |
 | `mcpPortal` | upstream `gatekeeper-mcp-portal` | Admin-configured portal |
-| `snowflake` | outer `packages/gatekeeper-snowflake` (to be created) | Snowflake-scoped credentials |
-| `huggingface` | outer `packages/gatekeeper-huggingface` | Fine-grained Hub token / OAuth |
+| `snowflake` | outer `packages/gatekeeper-snowflake` (implemented, not yet deployed) | Snowflake-scoped credentials |
+| `huggingface` | outer `packages/gatekeeper-huggingface` (implemented, in the metadata catalog, not yet deployed) | Fine-grained Hub token / OAuth |
 
 ## Unified implementation plan
 

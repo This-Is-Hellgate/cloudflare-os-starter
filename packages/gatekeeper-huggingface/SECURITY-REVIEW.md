@@ -1,7 +1,10 @@
 # Hugging Face Gatekeeper — moderate API security review
 
-Status: API design only. Runtime implementation, deployment, OAuth/token setup, and Workshop
-registration are intentionally not included until the operator approves this boundary.
+Status: Implemented in this starter (`packages/gatekeeper-huggingface`) and listed in the
+optional-Gatekeeper catalog (`scripts/deployment-config.ts`), but **not deployable**: the
+deployment generator does not emit its Worker config or bindings, and writes are disabled in code
+(`applyAction` throws). OAuth/token setup and Workshop registration are intentionally not included
+until the operator approves this boundary.
 
 ## Resource scopes
 

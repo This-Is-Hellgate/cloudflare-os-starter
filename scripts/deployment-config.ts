@@ -23,7 +23,8 @@ export type OptionalGatekeeperId =
   | "cloudflare"
   | "mcp"
   | "mcpPortal"
-  | "snowflake";
+  | "snowflake"
+  | "huggingface";
 
 /** One reviewed, deployable integration in the outer repository's deployment catalog. */
 export interface GatekeeperCatalogEntry {
@@ -34,7 +35,7 @@ export interface GatekeeperCatalogEntry {
   /** Public Router prefix; the Worker itself remains private behind the Router. */
   routePrefix: `/gatekeeper/${string}`;
   /** Credential/configuration shape; secrets are supplied separately at deploy time. */
-  auth: "oauth2" | "endpoint" | "portal" | "snowflake";
+  auth: "oauth2" | "endpoint" | "portal" | "snowflake" | "huggingface";
 }
 
 /**
@@ -79,6 +80,12 @@ export const OPTIONAL_GATEKEEPER_CATALOG: Record<OptionalGatekeeperId, Gatekeepe
     binding: "GATEKEEPER_SNOWFLAKE",
     routePrefix: "/gatekeeper/snowflake",
     auth: "snowflake",
+  },
+  huggingface: {
+    packageDir: "packages/gatekeeper-huggingface",
+    binding: "GATEKEEPER_HUGGINGFACE",
+    routePrefix: "/gatekeeper/huggingface",
+    auth: "huggingface",
   },
 };
 
