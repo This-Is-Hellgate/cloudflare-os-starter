@@ -15,6 +15,7 @@ import type {
   ProdWranglerConfig,
   RouterRoute,
 } from "./deployment-config.ts";
+import { OPTIONAL_GATEKEEPER_CATALOG } from "./deployment-config.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // One deployment per checkout; use separate worktrees for concurrent deploys.
@@ -215,6 +216,24 @@ export function validateConfig(config: DeploymentConfig): DeploymentConfig {
   const workerNames = Object.entries(config.workers)
     .filter(([key]) => key !== "errorReporter" || config.errorReporting.enabled)
     .map(([, worker]) => worker.name);
+  for (const [id, gatekeeper] of Object.entries(config.gatekeepers)) {
+    if (!(id in OPTIONAL_GATEKEEPER_CATALOG)) {
+      throw new Error(`Unknown optional Gatekeeper: ${id}.`);
+    }
+    if (typeof gatekeeper?.enabled !== "boolean") {
+      throw new Error(`Gatekeeper ${id}.enabled must be a boolean.`);
+    }
+    if (gatekeeper.enabled &&
+        (typeof gatekeeper.workerName !== "string" || !gatekeeper.workerName)) {
+      throw new Error(`Gatekeeper ${id}.workerName is required when enabled.`);
+    }
+    if (gatekeeper.workerName !== null &&
+        (typeof gatekeeper.workerName !== "string" ||
+         !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(gatekeeper.workerName))) {
+      throw new Error(`Gatekeeper ${id}.workerName must use lowercase letters, numbers, and hyphens.`);
+    }
+    if (gatekeeper.enabled) workerNames.push(gatekeeper.workerName!);
+  }
   if (new Set(workerNames).size !== workerNames.length) {
     throw new Error(
       "Router, Workshop, Context, Scheduler, and custom Gatekeeper names must be unique.");

@@ -21,6 +21,14 @@ const validConfig: DeploymentConfig = {
     customGatekeeper: { name: "acme-cloudflare-os-custom" },
     errorReporter: { name: "acme-cloudflare-os-errors" },
   },
+  gatekeepers: {
+    github: { enabled: false, workerName: null },
+    confluence: { enabled: false, workerName: null },
+    cloudflare: { enabled: false, workerName: null },
+    mcp: { enabled: false, workerName: null },
+    mcpPortal: { enabled: false, workerName: null },
+    snowflake: { enabled: false, workerName: null },
+  },
   access: {
     issuer: "https://acme.cloudflareaccess.com",
     audience: "access-audience",
@@ -157,6 +165,29 @@ test("rejects destructive or malformed deployment values", () => {
   assert.throws(
     () => validateConfig(variant((c) => { c.context.artifacts.namespace = "context/collections"; })),
     /namespace must be omitted/i);
+});
+
+test("optional Gatekeepers are disabled by default and validate worker identities", () => {
+  assert.doesNotThrow(() => validateConfig(validConfig));
+  assert.throws(
+    () => validateConfig(variant((c) => {
+      c.gatekeepers.snowflake = { enabled: true, workerName: null };
+    })),
+    /snowflake\.workerName is required/i,
+  );
+  assert.throws(
+    () => validateConfig(variant((c) => {
+      c.gatekeepers.mcp.workerName = "MCP-Worker";
+    })),
+    /Gatekeeper mcp\.workerName/i,
+  );
+  assert.throws(
+    () => validateConfig(variant((c) => {
+      c.gatekeepers.github = { enabled: true, workerName: "acme-shared" };
+      c.gatekeepers.confluence = { enabled: true, workerName: "acme-shared" };
+    })),
+    /unique/i,
+  );
 });
 
 test("rejects AI Gateway keys that no longer do anything", () => {

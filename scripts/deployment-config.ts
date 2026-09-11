@@ -16,6 +16,80 @@ import type {
 /** A model provider the Workshop can serve through AI Gateway with deployment-managed keys. */
 export type AiGatewayProvider = "anthropic" | "openai" | "google" | "cloudflare";
 
+/** The optional external integrations this Starter can install as separate Gatekeeper Workers. */
+export type OptionalGatekeeperId =
+  | "github"
+  | "confluence"
+  | "cloudflare"
+  | "mcp"
+  | "mcpPortal"
+  | "snowflake";
+
+/** One reviewed, deployable integration in the outer repository's deployment catalog. */
+export interface GatekeeperCatalogEntry {
+  /** Upstream package directory, relative to the nested Cloudflare OS checkout. */
+  packageDir: string;
+  /** Service binding used by the Workshop and Router. */
+  binding: `GATEKEEPER_${string}`;
+  /** Public Router prefix; the Worker itself remains private behind the Router. */
+  routePrefix: `/gatekeeper/${string}`;
+  /** Credential/configuration shape; secrets are supplied separately at deploy time. */
+  auth: "oauth2" | "endpoint" | "portal" | "snowflake";
+}
+
+/**
+ * Single source of truth for optional Gatekeeper identity and routing metadata.
+ *
+ * This is intentionally metadata-only in the first milestone. Deployment generation will consume
+ * it in a later change, after each package's bindings and secret contract have been reviewed.
+ */
+export const OPTIONAL_GATEKEEPER_CATALOG: Record<OptionalGatekeeperId, GatekeeperCatalogEntry> = {
+  github: {
+    packageDir: "cloudflare-os/packages/gatekeeper-github",
+    binding: "GATEKEEPER_GITHUB",
+    routePrefix: "/gatekeeper/github",
+    auth: "oauth2",
+  },
+  confluence: {
+    packageDir: "cloudflare-os/packages/gatekeeper-confluence",
+    binding: "GATEKEEPER_CONFLUENCE",
+    routePrefix: "/gatekeeper/confluence",
+    auth: "oauth2",
+  },
+  cloudflare: {
+    packageDir: "cloudflare-os/packages/gatekeeper-cloudflare",
+    binding: "GATEKEEPER_CLOUDFLARE",
+    routePrefix: "/gatekeeper/cloudflare",
+    auth: "oauth2",
+  },
+  mcp: {
+    packageDir: "cloudflare-os/packages/gatekeeper-mcp",
+    binding: "GATEKEEPER_MCP",
+    routePrefix: "/gatekeeper/mcp",
+    auth: "endpoint",
+  },
+  mcpPortal: {
+    packageDir: "cloudflare-os/packages/gatekeeper-mcp-portal",
+    binding: "GATEKEEPER_MCP_PORTAL",
+    routePrefix: "/gatekeeper/mcp-portal",
+    auth: "portal",
+  },
+  snowflake: {
+    packageDir: "packages/gatekeeper-snowflake",
+    binding: "GATEKEEPER_SNOWFLAKE",
+    routePrefix: "/gatekeeper/snowflake",
+    auth: "snowflake",
+  },
+};
+
+/** Optional Gatekeeper Worker identity and enablement, kept separate from core Workers. */
+export interface OptionalGatekeeperConfig {
+  /** Disabled by default so a clean deployment cannot create an unconfigured integration. */
+  enabled: boolean;
+  /** Required only when enabled; the name is a permanent Cloudflare Worker identity. */
+  workerName: string | null;
+}
+
 /** Every provider {@link AiGatewayProvider} allows, for validation and for error messages. */
 export const AI_GATEWAY_PROVIDERS: readonly AiGatewayProvider[] =
   ["anthropic", "openai", "google", "cloudflare"];
@@ -115,6 +189,8 @@ export interface DeploymentConfig {
     /** Only required when `errorReporting.enabled`. */
     errorReporter?: { name: string };
   };
+  /** Explicit optional Gatekeeper Workers; all are disabled until deliberately configured. */
+  gatekeepers: Record<OptionalGatekeeperId, OptionalGatekeeperConfig>;
   access: AccessConfig;
   aiGateway: AiGatewayConfigInput;
   context: ContextConfig;

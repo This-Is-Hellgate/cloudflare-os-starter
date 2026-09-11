@@ -36,6 +36,17 @@
     "errorReporter": { "name": "<ERROR_REPORTER_WORKER_NAME>" }
   },
 
+  // Optional integrations are explicit separate Workers. They are disabled until their package,
+  // bindings, credentials, and security review are complete. Do not put secrets in this file.
+  "gatekeepers": {
+    "github": { "enabled": false, "workerName": null },
+    "confluence": { "enabled": false, "workerName": null },
+    "cloudflare": { "enabled": false, "workerName": null },
+    "mcp": { "enabled": false, "workerName": null },
+    "mcpPortal": { "enabled": false, "workerName": null },
+    "snowflake": { "enabled": false, "workerName": null }
+  },
+
   // This starter deploys Cloudflare Access mode. Cloudflare OS also supports built-in password
   // accounts and auth Gatekeeper sign-in; see the reference below before switching. The audience
   // comes from the self-hosted Access application protecting the public hostname.
