@@ -1,14 +1,14 @@
 {
   // Cloudflare account that owns every Worker and provisioned resource.
   // Find it: https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/
-  "accountId": "<CLOUDFLARE_ACCOUNT_ID>",
+  "accountId": "9ae12807d5b18bf3d1bcbe38b9050e05",
 
   // The deployment's public origin, used for PUBLIC_BASE_URL and to scope Context data.
   // null derives it from workers.router.route.customDomain.
   // Required when the router uses workersDev: the account's workers.dev subdomain is not
   // knowable from this file. Write it as a bare origin, no path and no trailing slash --
   // "https://<router-name>.<subdomain>.workers.dev".
-  "publicBaseUrl": null,
+  "publicBaseUrl": "https://hellgate-os-router.mchayes89.workers.dev",
 
   // Worker names are permanent service identities. Keep them unique within the account.
   // Reference: docs/customization.md#workers-and-routing
@@ -16,24 +16,24 @@
     // Owns the public URL and serves the frontend. Proxies /api and /blueprint-screenshot to the
     // Workshop, and /gatekeeper/<name> to the matching Gatekeeper.
     "router": {
-      "name": "<ROUTER_WORKER_NAME>",
+      "name": "hellgate-os-router",
 
       // Production: use a hostname in an active Cloudflare zone. Wrangler creates DNS and TLS.
       // Evaluation: replace this with "route": { "workersDev": true } and set publicBaseUrl above.
       // https://developers.cloudflare.com/workers/configuration/routing/custom-domains/
-      "route": { "customDomain": "os.example.com" }
+      "route": { "workersDev": true }
     },
 
     // The Workshop backend. No public route: the router reaches it over a service binding.
-    "workshop": { "name": "<WORKSHOP_WORKER_NAME>" },
-    "context": { "name": "<CONTEXT_WORKER_NAME>" },
+    "workshop": { "name": "hellgate-os-workshop" },
+    "context": { "name": "hellgate-os-context" },
 
     // The Scheduler Gatekeeper, which gives agents scheduled and recurring work. Ambient like
     // the Context Gatekeeper
-    "scheduler": { "name": "<SCHEDULER_WORKER_NAME>" },
+    "scheduler": { "name": "hellgate-os-scheduler" },
 
-    "customGatekeeper": { "name": "<CUSTOM_GATEKEEPER_WORKER_NAME>" },
-    "errorReporter": { "name": "<ERROR_REPORTER_WORKER_NAME>" }
+    "customGatekeeper": { "name": "hellgate-os-gatekeeper" },
+    "errorReporter": { "name": "hellgate-os-reporter" }
   },
 
   // Optional integrations are explicit separate Workers. They are disabled until their package,
@@ -54,9 +54,9 @@
   // "admins" gates /admin in every sign-in method.
   // Reference: docs/customization.md#sign-in-methods
   "access": {
-    "issuer": "https://<TEAM_NAME>.cloudflareaccess.com",
-    "audience": "<ACCESS_AUDIENCE>",
-    "admins": ["<ADMIN_EMAIL>"]
+    "issuer": "https://cojinx.cloudflareaccess.com",
+    "audience": "acb1c2c483048cb968d476d2064cd8c76dbed3d064bb3fd41577dd5fe9c09eaf",
+    "admins": ["mchayes89@gmail.com"]
   },
 
   // Model catalog served through Cloudflare AI Gateway. Enabled by default: the Workshop reaches
@@ -101,8 +101,8 @@
   // Displayed to agents when the example custom integration is enabled in /admin.
   // Reference: docs/customization.md#custom-gatekeepers
   "customGatekeeper": {
-    "name": "<ORGANIZATION_DISPLAY_NAME>",
-    "message": "<ORGANIZATION_GUIDANCE>"
+    "name": "Hellgate Systems",
+    "message": "This Hellgate Systems deployment provides organization-specific guidance to agents. Keep responses aligned with the deployment owner's policies."
   },
 
   // Explicit backend issue reports go to a private Worker that emits structured console errors.
