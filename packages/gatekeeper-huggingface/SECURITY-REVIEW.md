@@ -2,8 +2,12 @@
 
 Status: Implemented in this starter (`packages/gatekeeper-huggingface`) and listed in the
 optional-Gatekeeper catalog (`scripts/deployment-config.ts`), but **not deployable**: the
-deployment generator does not emit its Worker config or bindings, and writes are disabled in code
-(`applyAction` throws). OAuth/token setup and Workshop registration are intentionally not included
+deployment generator does not emit its Worker config or bindings. Read surfaces are live:
+bounded dataset queries run through the approved `datasets-server.huggingface.co` backend
+(fixed dataset, config/split discovery, row/byte limits), and discussion listings return a
+real Cap'n Web `RpcTarget` cursor. Writes remain gated in code: `applyAction` executes an
+approved action only when the operator sets `HF_ENABLE_WRITES=true|1`; without the gate it
+throws. OAuth/token setup and Workshop registration are intentionally not included
 until the operator approves this boundary.
 
 ## Resource scopes
@@ -34,10 +38,10 @@ errors, or enter agent-visible model output.
 | --- | --- | --- |
 | Account/resource metadata, model card, dataset/Space info | Read | `authorizeObservation()`, bounded fields, vendor payload treated as untrusted. |
 | File list and text read | Read | `authorizeObservation()`, path traversal rejection, byte/page limits; no executable interpretation. |
-| Dataset query | Read | `authorizeObservation()`, fixed dataset/config/split, row/byte/time limits. |
-| Inference | Read with external cost/side-effect risk | `authorizeObservation()` plus per-request budget/rate limit; fixed model/provider and output cap. |
-| Discussion listing | Read | `authorizeObservation()`, bounded pages. |
-| Commit, discussion, comment, Space pause/resume | External write | `submitAction()`; simulate first, then only `applyAction()` after approval, followed by verification. |
+| Dataset query | Read | `authorizeObservation()`, fixed dataset, config/split resolved via `/splits`, row/byte limits (`maxRows` ≤ 1000, `maxBytes` ≤ 5 MB), whole-row byte enforcement. |
+| Inference | Read with external cost/side-effect risk | `authorizeObservation()` plus per-request budget/rate limit; fixed model/provider and output cap. Provider mode uses the governed `router.huggingface.co/v1/chat/completions` endpoint with reserved keys (`model`, `messages`, `max_tokens`) stripped from user parameters. |
+| Discussion listing and detail | Read | `authorizeObservation()`, bounded pages/comments; listing returns a Cap'n Web `RpcTarget` cursor. |
+| Commit, discussion, comment, Space pause/resume | External write | `submitAction()`; simulate first, then only `applyAction()` after approval, followed by verification. Execution additionally requires the operator gate `HF_ENABLE_WRITES=true|1`; the stored payload is re-validated before any remote call and `markApproved` records completion in the durable ledger. |
 
 Write proposals must validate paths, message/body size, change count, and revision. Commits should
 carry an idempotency key and verify the resulting commit SHA. Discussion and Space operations must

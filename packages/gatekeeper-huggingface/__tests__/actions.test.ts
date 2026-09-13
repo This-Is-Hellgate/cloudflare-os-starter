@@ -40,10 +40,18 @@ describe("Hugging Face durable action model", () => {
 
   it("refuses to execute while the executor is disabled", () => {
     expect(gatekeeper).toContain("Hugging Face write application is disabled until the action executor is enabled.");
+    expect(gatekeeper).toContain("writesEnabled(this.env)");
+    expect(gatekeeper).toContain("this.#stage.markApproved(actionId)");
+  });
+
+  it("executes approved actions only after verification of the stored payload", () => {
+    expect(gatekeeper).toContain("Stored commit payload is invalid.");
+    expect(gatekeeper).toContain("Stored comment payload is invalid.");
+    expect(gatekeeper).toContain("Stored Space payload does not match the bound resource.");
   });
 
   it("maps stored records onto the public write proposal", () => {
-    expect(gatekeeper).toContain("simulated: true");
+    expect(gatekeeper).toContain("simulated: record.state !== \"approved\"");
     expect(gatekeeper).toContain("findActionByProposalId");
   });
 });
@@ -75,13 +83,27 @@ describe("Hugging Face proposal policy", () => {
   it("returns the durable actionId on the proposal", () => {
     expect(session).toContain("actionId");
   });
+
+  it("queries datasets through the bounded datasets-server backend", () => {
+    expect(session).toContain("https://datasets-server.huggingface.co/rows");
+    expect(session).toContain("boundedInt(options?.maxRows, 100, 1000)");
+  });
+
+  it("returns a real Cap'n Web cursor for discussion listings", () => {
+    expect(session).toContain("new ArrayCursor<DiscussionSummary>(items)");
+  });
+
+  it("routes governed inference through the router with bounded output", () => {
+    expect(session).toContain("https://router.huggingface.co/v1/chat/completions");
+    expect(session).toContain("capOutput");
+  });
 });
 
 describe("Hugging Face agent-facing types", () => {
   it("keeps types-code.ts hand-synced with types.d.ts", () => {
     const declarations = readFileSync(new URL("../src/types.d.ts", import.meta.url), "utf8");
     const code = readFileSync(new URL("../src/types-code.ts", import.meta.url), "utf8");
-    for (const marker of ["actionId: number", "getWriteProposal(proposalId: string): Promise<WriteProposal | null>"]) {
+    for (const marker of ["actionId: number", "getWriteProposal(proposalId: string): Promise<WriteProposal | null>", "getDiscussion(number: number): Promise<HuggingFaceDiscussionDetail>", "HuggingFaceDiscussionDetail extends DiscussionSummary"]) {
       expect(declarations).toContain(marker);
       expect(code).toContain(marker);
     }

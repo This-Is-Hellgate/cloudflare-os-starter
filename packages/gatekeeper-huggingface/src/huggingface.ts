@@ -1,7 +1,7 @@
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import type { AccountDescription, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, ResourceConfiguratorFrame, ResourceDescription, SupportedResource, VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
-import type { CommitFileChange, DatasetQueryOptions, DiscussionSummary, HuggingFaceDatasetInfo, HuggingFaceFilePage, HuggingFaceModelCard, HuggingFaceRepository, HuggingFaceSession, HuggingFaceSpaceInfo, InferenceRequest, InferenceResult, InferenceTarget, WriteProposal } from "./types.js";
+import type { CommitFileChange, DatasetQueryOptions, DatasetQueryResult, DiscussionSummary, HuggingFaceCursor, HuggingFaceDatasetInfo, HuggingFaceDiscussionDetail, HuggingFaceFilePage, HuggingFaceModelCard, HuggingFaceRepository, HuggingFaceSession, HuggingFaceSpaceInfo, InferenceRequest, InferenceResult, InferenceTarget, WriteProposal } from "./types.js";
 import TYPES_CODE from "./types-code.js";
 import { Stage, type StageRecord } from "@gadgets/stage";
 
@@ -31,6 +31,9 @@ function parseResource(raw: string | undefined): Resource {
 
 function apiPath(resource: Resource, suffix = ""): string { return `https://huggingface.co/api/${resource.kind === "model" ? "models" : resource.kind === "dataset" ? "datasets" : "spaces"}/${encodeURIComponent(resource.id).replaceAll("%2F", "/")}${suffix}`; }
 function boundedString(value: string, max: number, name: string): string { if (value.length > max) throw new Error(`${name} exceeds the ${max}-character limit.`); return value; }
+function boundedInt(value: number | undefined, fallback: number, max: number): number { const n = value ?? fallback; if (!Number.isInteger(n) || n < 1 || n > max) throw new Error("Requested limit is outside the allowed bound."); return n; }
+function writesEnabled(env: Env): boolean { return env.HF_ENABLE_WRITES === "true" || env.HF_ENABLE_WRITES === "1"; }
+function capOutput(value: unknown, maxBytes = 256_000): { output: unknown; truncated: boolean } { const text = JSON.stringify(value) ?? "null"; if (text.length <= maxBytes) return { output: value, truncated: false }; return { output: text.slice(0, maxBytes), truncated: true }; }
 
 class HubClient {
   constructor(private readonly token: string) { if (!token) throw new Error("Hugging Face credentials are not configured."); }
@@ -39,6 +42,17 @@ class HubClient {
     const response = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(30_000) });
     if (!response.ok) { if ([401, 403, 404].includes(response.status)) throw new Error(`Hugging Face resource is not accessible (${response.status}).`); throw new Error(`Hugging Face request failed (${response.status}).`); }
     return response.headers.get("content-type")?.includes("json") ? response.json() : response.text();
+  }
+}
+
+@validateRpc()
+class ArrayCursor<T> extends RpcTarget {
+  #index = 0;
+  constructor(private readonly items: T[], private readonly pageSize = 100) { super(); if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 1000) throw new Error("Invalid cursor page size."); }
+  async next(): Promise<T[] | null> {
+    const page = this.items.slice(this.#index, this.#index + this.pageSize);
+    this.#index += this.pageSize;
+    return page.length ? page : null;
   }
 }
 
@@ -62,7 +76,52 @@ export class HuggingFaceGatekeeper extends DurableObject<Env, GatekeeperProps> i
     // than throwing (which would strand the action as forever un-appliable).
     if (record.state === "approved") return;
     if (record.state !== "pending" && record.state !== "staged") throw new Error(`Hugging Face action ${actionId} is no longer pending.`);
-    throw new Error("Hugging Face write application is disabled until the action executor is enabled.");
+    if (!writesEnabled(this.env)) throw new Error("Hugging Face write application is disabled until the action executor is enabled.");
+    await this.#execute(record);
+    await this.#stage.markApproved(actionId);
+  }
+
+  // The executor runs only behind an explicit operator gate (HF_ENABLE_WRITES) and after a human
+  // approval; the durable Stage record is the completion evidence.
+  async #execute(record: StoredHuggingFaceAction): Promise<void> {
+    const client = new HubClient(this.env.HF_TOKEN);
+    const r = parseResource(this.#url());
+    switch (record.operation) {
+      case "create_commit": {
+        const { message, changes, revision } = record.data as { message: string; changes: CommitFileChange[]; revision?: string };
+        if (!message || !Array.isArray(changes) || changes.length < 1 || changes.length > 50) throw new Error("Stored commit payload is invalid.");
+        for (const c of changes) if (!c?.path || c.path.includes("..") || c.path.startsWith("/") || c.path.length > 512) throw new Error("Stored commit payload is invalid.");
+        const payload = {
+          header: { summary: message.slice(0, 200), description: message },
+          changes: changes.map(c => c.operation === "delete"
+            ? { path: c.path, operation: "delete" }
+            : { path: c.path, operation: c.operation === "add" ? "add" : "update", content: c.content ?? "" }),
+        };
+        await client.request(apiPath(r, `/commit/${encodeURIComponent(revision ?? "main")}`), { method: "POST", body: JSON.stringify(payload) });
+        return;
+      }
+      case "create_discussion": {
+        const { title, body, pullRequest } = record.data as { title: string; body: string; pullRequest?: boolean };
+        const d = await client.request(apiPath(r, "/discussions"), { method: "POST", body: JSON.stringify({ title, description: body, pull_request: Boolean(pullRequest) }) });
+        if (!d || (d as any).num === undefined) throw new Error("Hugging Face discussion creation could not be verified.");
+        return;
+      }
+      case "comment_discussion": {
+        const { number, body } = record.data as { number: number; body: string };
+        if (!Number.isInteger(number) || number < 1) throw new Error("Stored comment payload is invalid.");
+        const d = await client.request(apiPath(r, `/discussions/${number}/comment`), { method: "POST", body: JSON.stringify({ comment: body }) });
+        if (!d) throw new Error("Hugging Face discussion comment could not be verified.");
+        return;
+      }
+      case "pause_space":
+      case "resume_space": {
+        if (r.kind !== "space") throw new Error("Stored Space payload does not match the bound resource.");
+        await client.request(apiPath(r, record.operation === "pause_space" ? "/pause" : "/restart"), { method: "POST" });
+        return;
+      }
+      default:
+        throw new Error(`Hugging Face action executor does not support operation ${record.operation}.`);
+    }
   }
 
   async rejectAction(actionId: number): Promise<void> {
@@ -90,7 +149,8 @@ export class HuggingFaceGatekeeper extends DurableObject<Env, GatekeeperProps> i
   async findActionByProposalId(proposalId: string): Promise<WriteProposal | null> {
     const record = await this.#stage.findByProposalId(proposalId);
     if (!record) return null;
-    return { proposalId, actionId: record.actionId, operation: record.operation, summary: record.summary, simulated: true };
+    // Honest state: once the executor has applied the change it is no longer simulated.
+    return { proposalId, actionId: record.actionId, operation: record.operation, summary: record.summary, simulated: record.state !== "approved" };
   }
 }
 
@@ -104,11 +164,94 @@ class HuggingFaceSessionImpl extends RpcTarget implements HuggingFaceSession {
   async getModelCard(): Promise<HuggingFaceModelCard> { const r = this.#resource(); if (r.kind !== "model") throw new Error("The bound resource is not a model."); const d = await this.#client().request(apiPath(r)); await this.queue.authorizeObservation({ title: "Read Hugging Face model card", description: `Read bounded metadata for ${r.id}.` }); return { id: d.id ?? r.id, libraryName: d.library_name, pipelineTag: d.pipeline_tag, tags: Array.isArray(d.tags) ? d.tags.slice(0, 100) : [], summary: typeof d.cardData?.model_summary === "string" ? d.cardData.model_summary.slice(0, 4000) : undefined }; }
   async getDatasetInfo(): Promise<HuggingFaceDatasetInfo> { const r = this.#resource(); if (r.kind !== "dataset") throw new Error("The bound resource is not a dataset."); const d = await this.#client().request(apiPath(r)); await this.queue.authorizeObservation({ title: "Read Hugging Face dataset metadata", description: `Read bounded metadata for ${r.id}.` }); return { id: d.id ?? r.id, tags: Array.isArray(d.tags) ? d.tags.slice(0, 100) : [], gated: Boolean(d.gated), private: Boolean(d.private), description: typeof d.description === "string" ? d.description.slice(0, 4000) : undefined }; }
   async getSpaceInfo(): Promise<HuggingFaceSpaceInfo> { const r = this.#resource(); if (r.kind !== "space") throw new Error("The bound resource is not a Space."); const d = await this.#client().request(apiPath(r)); await this.queue.authorizeObservation({ title: "Read Hugging Face Space metadata", description: `Read bounded metadata for ${r.id}.` }); return { id: d.id ?? r.id, sdk: d.sdk, runtime: d.runtime?.stage, private: Boolean(d.private), stage: d.stage }; }
-  async listFiles(path?: string, revision?: string): Promise<HuggingFaceFilePage> { const r = this.#resource(); const clean = (path ?? "").replace(/^\/+/, ""); if (clean.includes("..") || clean.length > 512) throw new Error("Invalid repository path."); const rev = revision ?? "main"; if (!/^[A-Za-z0-9._/-]{1,128}$/.test(rev)) throw new Error("Invalid revision."); const d = await this.#client().request(apiPath(r, `/tree/${encodeURIComponent(rev)}?path=${encodeURIComponent(clean)}&recursive=false&limit=100`)); await this.queue.authorizeObservation({ title: "List Hugging Face files", description: `List bounded paths under ${r.id}.` }); return { entries: (Array.isArray(d) ? d : []).slice(0, 100).map((x: any) => ({ path: String(x.path).slice(0, 512), size: typeof x.size === "number" ? x.size : undefined, type: x.type === "directory" ? "directory" : "file", lfs: x.lfs && { oid: String(x.lfs.oid), size: Number(x.lfs.size) } })), truncated: Array.isArray(d) && d.length > 100 }; }
+  async listFiles(path?: string, revision?: string): Promise<HuggingFaceFilePage> { const r = this.#resource(); const clean = (path ?? "").replace(/^\/+/, ""); if (clean.includes("..") || clean.length > 512) throw new Error("Invalid repository path."); const rev = revision ?? "main"; if (!/^[A-Za-z0-9._/-]{1,128}$/.test(rev)) throw new Error("Invalid revision."); const d = await this.#client().request(apiPath(r, `/tree/${encodeURIComponent(rev)}?path=${encodeURIComponent(clean)}&recursive=false&limit=100`)); await this.queue.authorizeObservation({ title: "List Hugging Face files", description: `List bounded paths under ${r.id}.` }); return { entries: (Array.isArray(d) ? d : []).slice(0, 100).map((x: any) => ({ path: String(x.path).slice(0, 512), size: typeof x.size === "number" ? x.size : undefined, type: x.type === "directory" ? "directory" : "file", lfs: x.lfs && { oid: String(x.lfs.oid), size: Number(x.lfs.size) } })), truncated: Array.isArray(d) && d.length >= 100 }; }
   async readTextFile(path: string, revision = "main", maxBytes = 256_000): Promise<string> { if (path.includes("..") || path.startsWith("/") || path.length > 512 || maxBytes < 1 || maxBytes > 1_000_000) throw new Error("Invalid bounded file request."); const r = this.#resource(); const d = await this.#client().request(`https://huggingface.co/${r.kind === "model" ? "" : `${r.kind}s/`}${r.id}/resolve/${encodeURIComponent(revision)}/${path}`); const text = String(d); await this.queue.authorizeObservation({ title: "Read Hugging Face text file", description: `Read a bounded text file from ${r.id}.` }); return text.slice(0, maxBytes); }
-  async queryDataset(_options?: DatasetQueryOptions): Promise<{ columns: string[]; rows: unknown[][]; rowCount: number; truncated: boolean }> { throw new Error("Dataset queries require an approved dataset query backend and are not enabled in this first Worker."); }
-  async runInference(request: InferenceRequest): Promise<InferenceResult> { const r = this.#resource(); if (r.kind !== "model") throw new Error("Inference requires a bound model."); const input = boundedString(request.input, 64_000, "input"); const model = this.env.HF_INFERENCE_MODEL ?? r.id; const result = await this.#client().request(`https://router.huggingface.co/hf-inference/models/${encodeURIComponent(model)}`, { method: "POST", body: JSON.stringify({ inputs: input, parameters: request.parameters }) }); await this.queue.authorizeObservation({ title: "Run Hugging Face inference", description: `Run bounded inference on ${model}.` }); return { output: result, model, provider: this.env.HF_INFERENCE_PROVIDER, truncated: false }; }
-  async listDiscussions(status?: "open" | "closed"): Promise<any> { const r = this.#resource(); let page = 0; const client = this.#client(); const first = await client.request(`https://huggingface.co/api/${r.kind === "model" ? "models" : r.kind === "dataset" ? "datasets" : "spaces"}/${r.id}/discussions?status=${status ?? "open"}&limit=100`); await this.queue.authorizeObservation({ title: "List Hugging Face discussions", description: `List bounded discussions for ${r.id}.` }); const items: DiscussionSummary[] = (Array.isArray(first) ? first : []).slice(0, 100).map((x: any) => ({ number: Number(x.num), title: String(x.title ?? "").slice(0, 300), status: x.status === "closed" ? "closed" : "open", kind: x.isPullRequest ? "pull_request" : "discussion", author: x.author?.name ? String(x.author.name).slice(0, 200) : undefined })); return { next: async () => page++ === 0 ? items : null }; }
+  async queryDataset(options?: DatasetQueryOptions): Promise<DatasetQueryResult> {
+    const r = this.#resource();
+    if (r.kind !== "dataset") throw new Error("Dataset queries require a bound dataset.");
+    const maxRows = boundedInt(options?.maxRows, 100, 1000);
+    const maxBytes = boundedInt(options?.maxBytes, 1_000_000, 5_000_000);
+    const client = this.#client();
+    // Resolve the config/split pair: explicit options win, otherwise the first queryable split
+    // advertised by the approved datasets-server backend.
+    let cfg = options?.config ? boundedString(options.config, 200, "config") : undefined;
+    let spl = options?.split ? boundedString(options.split, 200, "split") : undefined;
+    if (!cfg || !spl) {
+      const splits = await client.request(`https://datasets-server.huggingface.co/splits?dataset=${encodeURIComponent(r.id)}`);
+      const first = Array.isArray((splits as any)?.splits) ? (splits as any).splits[0] : undefined;
+      cfg = cfg ?? (first?.config !== undefined ? String(first.config).slice(0, 200) : undefined);
+      spl = spl ?? (first?.split !== undefined ? String(first.split).slice(0, 200) : undefined);
+    }
+    if (!cfg || !spl) throw new Error("Dataset has no queryable splits.");
+    const d = await client.request(`https://datasets-server.huggingface.co/rows?dataset=${encodeURIComponent(r.id)}&config=${encodeURIComponent(cfg)}&split=${encodeURIComponent(spl)}&offset=0&length=${Math.min(maxRows, 100)}`);
+    const features = Array.isArray((d as any)?.features) ? (d as any).features : [];
+    const rawRows = (Array.isArray((d as any)?.rows) ? (d as any).rows : []).slice(0, Math.min(maxRows, 100));
+    const firstRow = rawRows.length ? ((rawRows[0] as any)?.row ?? rawRows[0]) : undefined;
+    const columns = features.length
+      ? features.slice(0, 200).map((f: any) => String(f?.name ?? "")).filter(Boolean)
+      : firstRow && typeof firstRow === "object" ? Object.keys(firstRow).slice(0, 200) : [];
+    const rows: unknown[][] = rawRows.map((x: any) => { const obj = (x?.row ?? x) as Record<string, unknown> | undefined; return columns.map((c: string) => obj?.[c]); });
+    let truncated = Number((d as any)?.num_rows_total ?? 0) > rows.length;
+    // Enforce the byte budget by dropping whole rows rather than truncating mid-value.
+    while (rows.length > 1 && JSON.stringify(rows).length > maxBytes) { rows.pop(); truncated = true; }
+    await this.queue.authorizeObservation({ title: "Query Hugging Face dataset", description: `Read bounded rows from ${r.id} (${cfg}/${spl}).` });
+    return { columns, rows, rowCount: rows.length, truncated };
+  }
+  async runInference(request: InferenceRequest): Promise<InferenceResult> {
+    const r = this.#resource();
+    if (r.kind !== "model") throw new Error("Inference requires a bound model.");
+    const input = boundedString(request.input, 64_000, "input");
+    const model = this.env.HF_INFERENCE_MODEL ?? r.id;
+    const provider = this.env.HF_INFERENCE_PROVIDER;
+    const maxTokens = request.maxOutputTokens === undefined ? undefined : boundedInt(request.maxOutputTokens, 512, 8_192);
+    if (provider) {
+      // OpenAI-compatible chat completions through the governed router when an explicit provider
+      // is configured; the model and provider stay fixed by the binding. Reserved keys are
+      // stripped so request parameters cannot override the governed target.
+      const extra: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(request.parameters ?? {})) if (!["model", "messages", "max_tokens"].includes(k)) extra[k] = v;
+      const d = await this.#client().request("https://router.huggingface.co/v1/chat/completions", { method: "POST", body: JSON.stringify({ model, messages: [{ role: "user", content: input }], max_tokens: maxTokens ?? 512, ...extra }) });
+      await this.queue.authorizeObservation({ title: "Run Hugging Face inference", description: `Run bounded chat inference on ${model} via ${provider}.` });
+      const text = typeof (d as any)?.choices?.[0]?.message?.content === "string" ? (d as any).choices[0].message.content : undefined;
+      const finish = (d as any)?.choices?.[0]?.finish_reason;
+      const capped = capOutput(text !== undefined ? text : d);
+      return { output: capped.output, model, provider, truncated: capped.truncated || finish === "length" };
+    }
+    const result = await this.#client().request(`https://router.huggingface.co/hf-inference/models/${encodeURIComponent(model)}`, { method: "POST", body: JSON.stringify({ inputs: input, parameters: request.parameters }) });
+    await this.queue.authorizeObservation({ title: "Run Hugging Face inference", description: `Run bounded inference on ${model}.` });
+    const capped = capOutput(result);
+    return { output: capped.output, model, provider: undefined, truncated: capped.truncated };
+  }
+  async listDiscussions(status?: "open" | "closed"): Promise<HuggingFaceCursor<DiscussionSummary>> {
+    const r = this.#resource();
+    const client = this.#client();
+    const first = await client.request(apiPath(r, `/discussions?status=${status ?? "open"}&limit=100`));
+    await this.queue.authorizeObservation({ title: "List Hugging Face discussions", description: `List bounded discussions for ${r.id}.` });
+    const items: DiscussionSummary[] = (Array.isArray(first) ? first : []).slice(0, 100).map((x: any) => ({ number: Number(x.num), title: String(x.title ?? "").slice(0, 300), status: x.status === "closed" ? "closed" : "open", kind: x.isPullRequest ? "pull_request" : "discussion", author: x.author?.name ? String(x.author.name).slice(0, 200) : undefined }));
+    // A real Cap'n Web capability: the cursor is an RpcTarget stub the agent can keep calling,
+    // not a POJO that fails RPC serialization.
+    return new ArrayCursor<DiscussionSummary>(items);
+  }
+
+  async getDiscussion(number: number): Promise<HuggingFaceDiscussionDetail> {
+    if (!Number.isInteger(number) || number < 1) throw new Error("Invalid discussion number.");
+    const r = this.#resource();
+    const d = await this.#client().request(apiPath(r, `/discussions/${number}`));
+    await this.queue.authorizeObservation({ title: "Read Hugging Face discussion", description: `Read discussion #${number} for ${r.id}.` });
+    const events = Array.isArray((d as any)?.events) ? (d as any).events : [];
+    return {
+      number: Number((d as any)?.num ?? number),
+      title: String((d as any)?.title ?? "").slice(0, 300),
+      status: (d as any)?.status === "closed" ? "closed" : "open",
+      kind: (d as any)?.isPullRequest ? "pull_request" : "discussion",
+      author: (d as any)?.author?.name ? String((d as any).author.name).slice(0, 200) : undefined,
+      comments: events.filter((e: any) => e?.type === "comment").slice(0, 100).map((e: any) => ({
+        author: e.author?.name ? String(e.author.name).slice(0, 200) : undefined,
+        body: String(e.data ?? "").slice(0, 20_000),
+        createdAt: typeof e.created_at === "string" ? e.created_at : undefined,
+      })),
+    };
+  }
   async #proposal(operation: WriteProposal["operation"], summary: string, data: unknown, detail: string): Promise<WriteProposal> {
     const proposalId = crypto.randomUUID();
     const actionId = await this.gatekeeper.stageAction({ proposalId, operation, summary, data });
@@ -133,7 +276,7 @@ class HuggingFaceSessionImpl extends RpcTarget implements HuggingFaceSession {
     await this.gatekeeper.markActionPending(actionId);
     return { proposalId, actionId, operation, summary, simulated: true };
   }
-  async proposeCommit(message: string, changes: CommitFileChange[], revision?: string): Promise<WriteProposal> { if (!message || changes.length < 1 || changes.length > 50) throw new Error("A commit requires 1–50 changes."); boundedString(message, 500, "message"); for (const c of changes) { if (!c.path || c.path.includes("..") || c.path.startsWith("/") || c.path.length > 512) throw new Error("Invalid commit path."); if (c.content !== undefined) boundedString(c.content, 1_000_000, "file content"); } const detail = [`Commit message: ${message}`, `Revision: ${revision ?? "main"}`, `Changes (${changes.length}):`, ...changes.map(c => `- ${c.operation ?? "update"} \`${c.path}\`${c.content !== undefined ? ` (${c.content.length} bytes)` : ""}`)].join("\n"); return this.#proposal("create_commit", `Propose a commit to ${this.#resource().id}.`, { message, changes, revision }, detail); }
+  async proposeCommit(message: string, changes: CommitFileChange[], revision?: string): Promise<WriteProposal> { if (!message || changes.length < 1 || changes.length > 50) throw new Error("A commit requires 1–50 changes."); boundedString(message, 500, "message"); for (const c of changes) { if (!c.path || c.path.includes("..") || c.path.startsWith("/") || c.path.length > 512) throw new Error("Invalid commit path."); if (c.operation !== undefined && !["add", "update", "delete"].includes(c.operation)) throw new Error("Invalid commit operation."); if (c.content !== undefined) boundedString(c.content, 1_000_000, "file content"); } const detail = [`Commit message: ${message}`, `Revision: ${revision ?? "main"}`, `Changes (${changes.length}):`, ...changes.map(c => `- ${c.operation ?? "update"} \`${c.path}\`${c.content !== undefined ? ` (${c.content.length} bytes)` : ""}`)].join("\n"); return this.#proposal("create_commit", `Propose a commit to ${this.#resource().id}.`, { message, changes, revision }, detail); }
   async proposeDiscussion(title: string, body: string, pullRequest = false): Promise<WriteProposal> { const t = boundedString(title, 300, "title"); const b = boundedString(body, 20_000, "body"); const detail = `${pullRequest ? "Pull request" : "Discussion"} titled "${t}" with body:\n\n${b.slice(0, 2000)}${b.length > 2000 ? "\n…(truncated)" : ""}`; return this.#proposal("create_discussion", "Propose a Hugging Face discussion.", { title: t, body: b, pullRequest }, detail); }
   async proposeDiscussionComment(number: number, body: string): Promise<WriteProposal> { if (!Number.isInteger(number) || number < 1) throw new Error("Invalid discussion number."); const b = boundedString(body, 20_000, "body"); const detail = `Comment on discussion #${number}:\n\n${b.slice(0, 2000)}${b.length > 2000 ? "\n…(truncated)" : ""}`; return this.#proposal("comment_discussion", "Propose a Hugging Face discussion comment.", { number, body: b }, detail); }
   async proposeSpaceState(state: "pause" | "resume"): Promise<WriteProposal> { if (this.#resource().kind !== "space") throw new Error("Space state changes require a bound Space."); return this.#proposal(state === "pause" ? "pause_space" : "resume_space", `Propose to ${state} the Space.`, { state }, `Set the Space runtime state to **${state}**.`); }

@@ -100,6 +100,17 @@ export interface DiscussionSummary {
   author?: string;
 }
 
+export interface DiscussionComment {
+  author?: string;
+  /** Bounded comment text, treated as untrusted vendor content. */
+  body: string;
+  createdAt?: string;
+}
+
+export interface HuggingFaceDiscussionDetail extends DiscussionSummary {
+  comments: DiscussionComment[];
+}
+
 export interface WriteProposal {
   proposalId: string;
   /** Sequential, Gatekeeper-assigned action id; the id the approval flow will call back with. */
@@ -140,7 +151,7 @@ export interface HuggingFaceSession {
   /** Run inference only against the explicitly bound model/provider target. */
   runInference(request: InferenceRequest): Promise<InferenceResult>;
 
-  listDiscussions(status?: "open" | "closed"): Promise<HuggingFaceCursor<DiscussionSummary>>;
+  listDiscussions(status?: "open" | "closed"): Promise<HuggingFaceCursor<DiscussionSummary>>; getDiscussion(number: number): Promise<HuggingFaceDiscussionDetail>;
 
   /**
    * Queue an externally visible Hub change. The Gatekeeper simulates it and performs
