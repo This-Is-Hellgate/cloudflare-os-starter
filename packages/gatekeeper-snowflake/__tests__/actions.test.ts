@@ -4,20 +4,22 @@ import { describe, expect, it } from "vitest";
 // test pool. These tests exercise the vendor surface through source-level contracts. The durable
 // action state machine itself (sequential ids, staged-before-submit, retire-not-delete, live+retired
 // lookups, idempotent apply) now lives in @gadgets/stage and is tested behaviorally there; these
-// assertions pin the delegation and the vendor-specific policy that stays in this package.
+// assertions pin the delegation, the executor gate, and the vendor-specific policy split between
+// this package's implementation and its pure policy module.
 
 import { readFileSync } from "node:fs";
 
 const source = readFileSync(new URL("../src/snowflake.ts", import.meta.url), "utf8");
+const policySource = readFileSync(new URL("../src/policy.ts", import.meta.url), "utf8");
 
-function extractClass(name: string): string {
-  const start = source.indexOf(`class ${name}`);
+function extractClass(name: string, src: string = source): string {
+  const start = src.indexOf(`class ${name}`);
   if (start < 0) throw new Error(`class ${name} not found`);
-  const bodyStart = source.indexOf("{", start);
+  const bodyStart = src.indexOf("{", start);
   let depth = 0;
-  for (let i = bodyStart; i < source.length; i++) {
-    if (source[i] === "{") depth++;
-    else if (source[i] === "}") { depth--; if (depth === 0) return source.slice(start, i + 1); }
+  for (let i = bodyStart; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}") { depth--; if (depth === 0) return src.slice(start, i + 1); }
   }
   throw new Error(`class ${name} is unterminated`);
 }
@@ -39,11 +41,27 @@ describe("Snowflake durable action model", () => {
   });
 
   it("refuses to execute while the executor is disabled", () => {
+    expect(gatekeeper).toContain("writesEnabled(this.env)");
     expect(gatekeeper).toContain("Snowflake action executor is not enabled.");
   });
 
-  it("maps stored records onto the public write proposal", () => {
-    expect(gatekeeper).toContain("simulated: true");
+  it("re-validates the stored payload through the shared policy before executing", () => {
+    expect(gatekeeper).toContain("validateWriteProposal(policy, record.operation, record.target, record.sql)");
+    expect(gatekeeper).toContain("async #execute(record: StoredSnowflakeAction)");
+  });
+
+  it("executes the approved DML against the SQL API with the configured role and warehouse", () => {
+    expect(gatekeeper).toContain("statement: record.sql");
+    expect(gatekeeper).toContain("this.env.SNOWFLAKE_WAREHOUSE ? { warehouse: this.env.SNOWFLAKE_WAREHOUSE }");
+  });
+
+  it("marks the durable record approved only after the remote write succeeds", () => {
+    expect(gatekeeper).toContain("await this.#execute(record);");
+    expect(gatekeeper).toContain("await this.#stage.markApproved(actionId);");
+  });
+
+  it("maps stored records onto the public write proposal with honest state", () => {
+    expect(gatekeeper).toContain("simulated: record.state !== \"approved\"");
     expect(gatekeeper).toContain("findWriteByProposalId");
   });
 });
@@ -51,18 +69,22 @@ describe("Snowflake durable action model", () => {
 describe("Snowflake write proposal policy", () => {
   const session = extractClass("SessionImpl");
 
-  it("requires a fully-qualified write target", () => {
-    expect(session).toContain("Write target must be DATABASE.SCHEMA.TABLE.");
+  it("routes fresh proposals through the shared validation authority", () => {
+    expect(session).toContain("validateWriteProposal(p, operation, target, sql)");
   });
 
-  it("restricts proposals to the declared operation and forbids destructive keywords", () => {
-    expect(session).toContain("Only bounded INSERT, UPDATE, or MERGE proposals are permitted.");
-    expect(session).toContain("new RegExp(`^${operation}");
-    expect(session).toMatch(/DROP\|TRUNCATE\|ALTER\|CREATE\|GRANT\|REVOKE\|CALL\|DELETE/);
+  it("keeps the operation and destructive-keyword rules in the policy module", () => {
+    expect(policySource).toContain("Only bounded INSERT, UPDATE, or MERGE proposals are permitted.");
+    expect(policySource).toContain("new RegExp(`^${operation}");
+    expect(policySource).toMatch(/DROP\|TRUNCATE\|ALTER\|CREATE\|GRANT\|REVOKE\|CALL\|DELETE/);
+  });
+
+  it("requires a fully-qualified write target", () => {
+    expect(policySource).toContain("Write target must be DATABASE.SCHEMA.TABLE.");
   });
 
   it("bounds the SQL proposal size", () => {
-    expect(session).toContain("SQL proposal exceeds the size limit.");
+    expect(policySource).toContain("SQL proposal exceeds the size limit.");
   });
 
   it("submits a human-decision description and rolls back the staged record on failure", () => {
@@ -71,7 +93,43 @@ describe("Snowflake write proposal policy", () => {
     expect(session).toContain("markWritePending");
   });
 
+  it("pauses the agent until the human decision lands (writes are not simulated)", () => {
+    expect(session).toContain("awaitDecision: true");
+  });
+
   it("returns the durable actionId on the proposal", () => {
     expect(session).toContain("actionId");
+  });
+});
+
+describe("Snowflake API and capability surface", () => {
+  it("sends the configured role explicitly on every statement", () => {
+    expect(source).toContain("role: this.env.SNOWFLAKE_ROLE");
+  });
+
+  it("authenticates with a bearer token against the account SQL API", () => {
+    expect(source).toContain("/api/v2/statements");
+    expect(source).toContain("SNOWFLAKE_TOKEN");
+  });
+
+  it("targets the Cortex Analyst and Search endpoints", () => {
+    expect(source).toContain("/api/v2/cortex/analyst/message");
+    expect(source).toContain("cortex-search-services");
+    expect(source).toContain("semantic_view: view");
+  });
+
+  it("fails closed when Cortex allowlists are not configured", () => {
+    expect(source).toContain("SNOWFLAKE_CORTEX_SEMANTIC_VIEWS");
+    expect(source).toContain("SNOWFLAKE_CORTEX_SEARCH_SERVICES");
+  });
+
+  it("narrows the live database catalog by the configured allowlist", () => {
+    expect(source).toContain('metadata("SHOW DATABASES")');
+    expect(source).toContain("p.databases.has(d.name.toUpperCase())");
+  });
+
+  it("guards read-only SQL with the bounded SELECT policy", () => {
+    expect(source).toContain("Only bounded SELECT statements are permitted.");
+    expect(source).toContain("allowed(p.databases, options.database, \"Database\")");
   });
 });

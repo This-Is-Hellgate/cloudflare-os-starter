@@ -8,45 +8,28 @@ import type {
 import type {
   SnowflakeAccount as SnowflakeAccountInfo, DatabaseSummary, SchemaSummary, TableSummary, TableDescription,
   ColumnDescription, SnowflakeCursor, ReadOnlySqlOptions, ReadOnlySqlResult,
-  CortexAnalystRequest, CortexAnalystResult, CortexSearchRequest, CortexSearchResult,
+  CortexAnalystRequest, CortexAnalystResult, CortexSearchRequest, CortexSearchResult, SearchResult,
   CortexAgentRequest, CortexAgentResult, CustomToolSummary, CustomToolRequest, CustomToolResult,
   SnowflakeWriteProposal,
   SnowflakeSession,
 } from "./types.js";
 import TYPES_CODE from "./types-code.js";
 import { Stage, type StageRecord } from "@gadgets/stage";
+import {
+  allowed, boundedInt, boundedText, identifier, qualified, snowflakePolicy, validateWriteProposal,
+  writesEnabled, MAX_QUESTION, MAX_SQL,
+} from "./policy.js";
 
 const RESOURCE: SupportedResource = {
   urlPattern: "snowflake://account/*",
   title: "Snowflake account capability",
-  description: "Scoped Snowflake metadata, bounded SQL, Cortex, and approved tool access.",
+  description: "Scoped Snowflake metadata, bounded read-only SQL, Cortex Analyst/Search, and approval-gated data actions.",
   grantable: true,
 };
 const ICON = { url: "https://www.snowflake.com/wp-content/uploads/2022/03/cropped-snowflake.png" };
-const MAX_SQL = 32_000;
-const DEFAULT_ROWS = 1000;
-const DEFAULT_BYTES = 2_000_000;
-const boundedInt = (v: number | undefined, fallback: number, max: number) => {
-  const n = v ?? fallback;
-  if (!Number.isInteger(n) || n < 1 || n > max) throw new Error("Requested limit is outside the allowed bound.");
-  return n;
-};
-
-function config(env: Env) {
-  if (!env.SNOWFLAKE_TOKEN || !env.SNOWFLAKE_ACCOUNT || !env.SNOWFLAKE_ROLE) throw new Error("Snowflake credentials are not configured.");
-  const allow = (raw?: string) => new Set((raw ?? "").split(",").map(x => x.trim().toUpperCase()).filter(Boolean));
-  return { databases: allow(env.SNOWFLAKE_DATABASES), schemas: allow(env.SNOWFLAKE_SCHEMAS), tables: allow(env.SNOWFLAKE_TABLES), maxRows: Number(env.SNOWFLAKE_MAX_ROWS ?? DEFAULT_ROWS), maxBytes: Number(env.SNOWFLAKE_MAX_BYTES ?? DEFAULT_BYTES) };
-}
-function identifier(value: string, label: string): string {
-  if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(value)) throw new Error(`Invalid ${label}.`);
-  return value.toUpperCase();
-}
-function qualified(db: string, schema: string, table?: string): string {
-  const d = identifier(db, "database"), s = identifier(schema, "schema");
-  return table === undefined ? `${d}.${s}` : `${d}.${s}.${identifier(table, "table")}`;
-}
-function allowed(set: Set<string>, value: string, label: string) {
-  if (set.size && !set.has(value.toUpperCase()) && !set.has(value.split(".").slice(-1)[0])) throw new Error(`${label} is outside the configured allowlist.`);
+function cell(row: unknown[], columns: { name: string }[], key: string): unknown {
+  const index = columns.findIndex(c => c.name.toLowerCase() === key);
+  return index >= 0 ? row[index] : undefined;
 }
 function cursor<T>(items: T[], size = 100): SnowflakeCursor<T> {
   let index = 0;
@@ -56,11 +39,19 @@ function cursor<T>(items: T[], size = 100): SnowflakeCursor<T> {
 
 class SnowflakeApi {
   constructor(private readonly env: Env) {}
-  private async request(body: Record<string, unknown>) {
-    const base = (this.env.SNOWFLAKE_BASE_URL ?? `https://${this.env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com`).replace(/\/$/, "");
-    const response = await fetch(`${base}/api/v2/statements`, { method: "POST", headers: { authorization: `Bearer ${this.env.SNOWFLAKE_TOKEN}`, "content-type": "application/json", accept: "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
-    if (!response.ok) throw new Error(`Snowflake request failed (${response.status}).`);
-    const data = await response.json() as any;
+  #base(): string {
+    return (this.env.SNOWFLAKE_BASE_URL ?? `https://${this.env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com`).replace(/\/$/, "");
+  }
+  async #post(path: string, body: Record<string, unknown>, label: string): Promise<any> {
+    const response = await fetch(`${this.#base()}${path}`, { method: "POST", headers: { authorization: `Bearer ${this.env.SNOWFLAKE_TOKEN}`, "content-type": "application/json", accept: "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+    if (!response.ok) throw new Error(`${label} failed (${response.status}).`);
+    return response.json();
+  }
+  // The configured role is sent explicitly on every statement: getAccount() advertises it as the
+  // capability's active role, so it must actually govern what runs rather than falling back to
+  // the credential's default role.
+  async request(body: Record<string, unknown>) {
+    const data = await this.#post("/api/v2/statements", { role: this.env.SNOWFLAKE_ROLE, ...body }, "Snowflake request");
     const result = Array.isArray(data.data) ? data.data : [];
     const meta = Array.isArray(data.resultSetMetaData?.rowType) ? data.resultSetMetaData.rowType : [];
     return { queryId: String(data.statementHandle ?? data.queryId ?? "unknown"), columns: meta.map((x: any) => ({ name: String(x.name ?? ""), type: String(x.type ?? "") })), rows: result };
@@ -69,12 +60,21 @@ class SnowflakeApi {
     const text = sql.trim().replace(/;+$/, "");
     if (text.length > MAX_SQL || !/^SELECT\b/i.test(text) || /\b(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|COPY|CALL|USE|GRANT|REVOKE|PUT|GET)\b/i.test(text)) throw new Error("Only bounded SELECT statements are permitted.");
     const db = identifier(options.database, "database"), schema = identifier(options.schema, "schema");
+    const startedAt = Date.now();
     const result = await this.request({ statement: text, timeout: boundedInt(options.timeoutSeconds, 30, 120), database: db, schema, warehouse: options.warehouse });
-    const rows = result.rows.slice(0, Math.min(maxRows, boundedInt(options.maxRows, maxRows, maxRows)));
-    const encoded = JSON.stringify(rows); const clipped = encoded.length > Math.min(maxBytes, boundedInt(options.maxBytes, maxBytes, maxBytes));
-    return { queryId: result.queryId, columns: result.columns, rows: clipped ? rows.slice(0, Math.max(0, rows.length - 1)) : rows, rowCount: rows.length, truncated: clipped || rows.length < result.rows.length, elapsedMs: 0 };
+    const rowLimit = Math.min(maxRows, boundedInt(options.maxRows, maxRows, maxRows));
+    const byteLimit = Math.min(maxBytes, boundedInt(options.maxBytes, maxBytes, maxBytes));
+    let rows = result.rows.slice(0, rowLimit);
+    // Drop whole rows until the encoded payload fits the byte budget: a partially clipped row
+    // would not be valid JSON for the consumer.
+    while (rows.length > 0 && JSON.stringify(rows).length > byteLimit) rows = rows.slice(0, -1);
+    return { queryId: result.queryId, columns: result.columns, rows, rowCount: rows.length, truncated: rows.length < result.rows.length, elapsedMs: Date.now() - startedAt };
   }
   async metadata(sql: string) { return this.request({ statement: sql, timeout: 30 }); }
+  async analyst(body: Record<string, unknown>) { return this.#post("/api/v2/cortex/analyst/message", body, "Cortex Analyst request"); }
+  async search(database: string, schema: string, service: string, body: Record<string, unknown>) {
+    return this.#post(`/api/v2/databases/${database}/schemas/${schema}/cortex-search-services/${service}:query`, body, "Cortex Search request");
+  }
 }
 
 type Props = { account?: string };
@@ -102,7 +102,7 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
 @validateRpc() export class SnowflakeGatekeeper extends DurableObject<Env, Props> implements Gatekeeper<SnowflakeSession> {
   readonly #stage = new Stage<SnowflakeWriteAction>({ kv: this.ctx.storage.kv, label: "Snowflake" });
 
-  async describe(): Promise<ResourceDescription> { return { url: `snowflake://${this.ctx.props?.account ?? this.env.SNOWFLAKE_ACCOUNT}`, title: "Snowflake capability", snippet: "Bounded metadata, read-only SQL, Cortex, and approved custom tools.", suggestedBindingName: "SNOWFLAKE", tsType: "SnowflakeSession" }; }
+  async describe(): Promise<ResourceDescription> { return { url: `snowflake://${this.ctx.props?.account ?? this.env.SNOWFLAKE_ACCOUNT}`, title: "Snowflake capability", snippet: "Bounded metadata, read-only SQL, Cortex Analyst/Search, and approval-gated data actions.", suggestedBindingName: "SNOWFLAKE", tsType: "SnowflakeSession" }; }
   async getTypeScriptTypes() { return TYPES_CODE; } async getAutoApprovableActions(): Promise<[]> { return []; }
   async startSession(q: RpcStub<ApprovalQueue>): Promise<SnowflakeSession> { return new SessionImpl(q.dup(), this.env, this); }
   async addObserver() { throw new Error("Snowflake bindings require observer ACL verification before sharing."); }
@@ -116,7 +116,24 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
     // throwing (which would strand the action as forever un-appliable).
     if (record.state === "approved") return;
     if (record.state !== "pending" && record.state !== "staged") throw new Error(`Snowflake action ${actionId} is no longer pending.`);
-    throw new Error("Snowflake action executor is not enabled.");
+    if (!writesEnabled(this.env)) throw new Error("Snowflake action executor is not enabled.");
+    await this.#execute(record);
+    await this.#stage.markApproved(actionId);
+  }
+
+  // The executor runs only behind an explicit operator gate (SNOWFLAKE_ENABLE_WRITES) and after a
+  // human approval; the durable Stage record is the completion evidence. The stored payload is
+  // re-validated against the same policy as a fresh proposal before any remote call.
+  async #execute(record: StoredSnowflakeAction): Promise<void> {
+    const policy = snowflakePolicy(this.env);
+    const { database, schema } = validateWriteProposal(policy, record.operation, record.target, record.sql);
+    await new SnowflakeApi(this.env).request({
+      statement: record.sql,
+      timeout: 30,
+      database,
+      schema,
+      ...(this.env.SNOWFLAKE_WAREHOUSE ? { warehouse: this.env.SNOWFLAKE_WAREHOUSE } : {}),
+    });
   }
 
   async rejectAction(actionId: number): Promise<void> {
@@ -144,29 +161,99 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
   async findWriteByProposalId(proposalId: string): Promise<SnowflakeWriteProposal | null> {
     const record = await this.#stage.findByProposalId(proposalId);
     if (!record) return null;
-    return { proposalId, actionId: record.actionId, operation: record.operation, target: record.target, sql: record.sql, simulated: true };
+    // Honest state: once the executor has applied the DML it is no longer simulated.
+    return { proposalId, actionId: record.actionId, operation: record.operation, target: record.target, sql: record.sql, simulated: record.state !== "approved" };
   }
 }
 @validateRpc() class SessionImpl extends RpcTarget implements SnowflakeSession {
   constructor(private readonly queue: RpcStub<ApprovalQueue>, private readonly env: Env, private readonly gatekeeper: SnowflakeGatekeeper) { super(); }
-  private policy() { return config(this.env); } private api() { return new SnowflakeApi(this.env); }
+  private policy() { return snowflakePolicy(this.env); } private api() { return new SnowflakeApi(this.env); }
   async getAccount(): Promise<SnowflakeAccountInfo> { return { accountIdentifier: this.env.SNOWFLAKE_ACCOUNT, role: this.env.SNOWFLAKE_ROLE, warehouse: this.env.SNOWFLAKE_WAREHOUSE }; }
-  async listDatabases() { const p = this.policy(); const names = [...p.databases].map(name => ({ name })); await this.queue.authorizeObservation({ title: "Read Snowflake databases", description: "Read the configured Snowflake database catalog." }); return cursor<DatabaseSummary>(names); }
+  async listDatabases() {
+    const p = this.policy();
+    const x = await this.api().metadata("SHOW DATABASES");
+    const live = (x.rows ?? []).slice(0, 1000).map((r: unknown[]) => {
+      const name = String(cell(r, x.columns, "name") ?? "");
+      const raw = cell(r, x.columns, "comment");
+      const comment = raw === undefined || raw === null || raw === "" ? undefined : String(raw);
+      return { name, ...(comment ? { comment } : {}) };
+    }).filter((d: { name: string }) => d.name);
+    // The configured allowlist narrows the live catalog; with no allowlist the full catalog is
+    // returned under the same 1000-entry page cap.
+    const names = p.databases.size ? live.filter((d: { name: string }) => p.databases.has(d.name.toUpperCase())) : live;
+    await this.queue.authorizeObservation({ title: "Read Snowflake databases", description: "Read the Snowflake database catalog." });
+    return cursor<DatabaseSummary>(names);
+  }
   async listSchemas(database: string) { const p = this.policy(); const d = identifier(database, "database"); allowed(p.databases, d, "Database"); const x = await this.api().metadata(`SHOW SCHEMAS IN DATABASE ${d}`); const rows = (x.rows ?? []).slice(0, 1000).map((r: any[]) => ({ database: d, name: String(r[1] ?? r[0] ?? "") })); await this.queue.authorizeObservation({ title: "Read Snowflake schemas", description: `Read schemas in ${d}.` }); return cursor<SchemaSummary>(rows); }
   async listTables(database: string, schema: string) { const p = this.policy(); const q = qualified(database, schema); allowed(p.databases, database, "Database"); allowed(p.schemas, q, "Schema"); const x = await this.api().metadata(`SHOW TABLES IN SCHEMA ${q}`); const rows = (x.rows ?? []).slice(0, 1000).map((r: any[]) => ({ database: identifier(database, "database"), schema: identifier(schema, "schema"), name: String(r[1] ?? r[0] ?? ""), kind: "table" as const })); await this.queue.authorizeObservation({ title: "Read Snowflake tables", description: `Read tables in ${q}.` }); return cursor<TableSummary>(rows); }
   async describeTable(database: string, schema: string, table: string): Promise<TableDescription> { const p = this.policy(); const q = qualified(database, schema, table); allowed(p.tables, q, "Table"); const x = await this.api().metadata(`DESCRIBE TABLE ${q}`); const columns: ColumnDescription[] = (x.rows ?? []).slice(0, 1000).map((r: any[]) => ({ name: String(r[0] ?? ""), dataType: String(r[1] ?? ""), nullable: String(r[3] ?? "YES").toUpperCase() === "YES" })); await this.queue.authorizeObservation({ title: "Read Snowflake table description", description: `Read the schema for ${q}.` }); return { database: identifier(database, "database"), schema: identifier(schema, "schema"), name: identifier(table, "table"), kind: "table", columns }; }
-  async runReadOnlySql(sql: string, options: ReadOnlySqlOptions): Promise<ReadOnlySqlResult> { const p = this.policy(); const q = qualified(options.database, options.schema); allowed(p.schemas, q, "Schema"); const out = await this.api().sql(sql, options, p.maxRows, p.maxBytes); await this.queue.authorizeObservation({ title: "Read Snowflake query result", description: `Read a bounded SELECT in ${q}.` }); return out; }
-  async cortexAnalyst(_r: CortexAnalystRequest): Promise<CortexAnalystResult> { throw new Error("Cortex Analyst requires an explicitly configured Snowflake semantic view endpoint."); }
-  async cortexSearch(_r: CortexSearchRequest): Promise<CortexSearchResult> { throw new Error("Cortex Search requires an explicitly configured service endpoint."); }
+  async runReadOnlySql(sql: string, options: ReadOnlySqlOptions): Promise<ReadOnlySqlResult> { const p = this.policy(); const q = qualified(options.database, options.schema); allowed(p.databases, options.database, "Database"); allowed(p.schemas, q, "Schema"); const out = await this.api().sql(sql, options, p.maxRows, p.maxBytes); await this.queue.authorizeObservation({ title: "Read Snowflake query result", description: `Read a bounded SELECT in ${q}.` }); return out; }
+  async cortexAnalyst(r: CortexAnalystRequest): Promise<CortexAnalystResult> {
+    const p = this.policy();
+    // Fail closed: Analyst runs only against operator-allowlisted semantic views.
+    if (!p.semanticViews.size) throw new Error("Cortex Analyst requires an explicitly configured semantic view allowlist (SNOWFLAKE_CORTEX_SEMANTIC_VIEWS).");
+    const segments = r.semanticView.split(".");
+    if (segments.length !== 3) throw new Error("Semantic view must be DATABASE.SCHEMA.VIEW.");
+    const view = qualified(segments[0], segments[1], segments[2]);
+    allowed(p.semanticViews, view, "Semantic view");
+    boundedText(r.question, MAX_QUESTION, "Question");
+    await this.queue.authorizeObservation({ title: "Ask Cortex Analyst", description: `Ask Cortex Analyst a question using semantic view \`${view}\`.` });
+    const data = await this.api().analyst({
+      messages: [{ role: "user", content: [{ type: "text", text: r.question }] }],
+      semantic_view: view,
+    });
+    const content = Array.isArray(data.message?.content) ? data.message.content : [];
+    let answer = "";
+    let generatedSql: string | undefined;
+    for (const block of content) {
+      if (block?.type === "text" && typeof block.text === "string") answer += (answer ? "\n\n" : "") + block.text;
+      if (block?.type === "sql" && typeof block.statement === "string") generatedSql = block.statement;
+    }
+    if (!answer && !generatedSql) throw new Error("Cortex Analyst returned no usable answer.");
+    // Run the generated SQL only when its schema is allowlisted and it passes the same bounded
+    // SELECT guard as runReadOnlySql; otherwise return the statement unexecuted.
+    let rows: unknown[][] | undefined;
+    let truncated = false;
+    if (generatedSql) {
+      const context = `${identifier(segments[0], "database")}.${identifier(segments[1], "schema")}`;
+      if (!p.schemas.size || p.schemas.has(context)) {
+        try {
+          const q = await this.api().sql(generatedSql, { database: segments[0], schema: segments[1], maxRows: r.maxRows }, p.maxRows, p.maxBytes);
+          rows = q.rows;
+          truncated = q.truncated;
+        } catch {
+          // Not a bounded SELECT (or the query failed): the statement is returned unexecuted.
+        }
+      }
+    }
+    return { answer: answer || generatedSql!, generatedSql, rows, citations: [], truncated };
+  }
+  async cortexSearch(r: CortexSearchRequest): Promise<CortexSearchResult> {
+    const p = this.policy();
+    // Fail closed: Search runs only against operator-allowlisted services.
+    if (!p.searchServices.size) throw new Error("Cortex Search requires an explicitly configured service allowlist (SNOWFLAKE_CORTEX_SEARCH_SERVICES).");
+    const segments = r.service.split(".");
+    if (segments.length !== 3) throw new Error("Search service must be DATABASE.SCHEMA.SERVICE.");
+    const service = qualified(segments[0], segments[1], segments[2]);
+    allowed(p.searchServices, service, "Search service");
+    boundedText(r.query, MAX_QUESTION, "Search query");
+    await this.queue.authorizeObservation({ title: "Query Cortex Search", description: `Query the Cortex Search service \`${service}\`.` });
+    // No `columns` parameter: the service returns its own search column, which keeps rows small.
+    const data = await this.api().search(segments[0].toUpperCase(), segments[1].toUpperCase(), segments[2].toUpperCase(), { query: r.query, limit: boundedInt(r.maxResults, 10, 100) });
+    const raw = Array.isArray(data.results) ? data.results : [];
+    const results: SearchResult[] = raw.slice(0, 100).map((row: Record<string, unknown>) => {
+      const strings = Object.values(row ?? {}).filter((v): v is string => typeof v === "string");
+      const snippet = strings.sort((a, b) => b.length - a.length)[0] ?? JSON.stringify(row ?? {});
+      return { title: service, snippet: snippet.slice(0, 2_000) };
+    });
+    return { results, truncated: raw.length > results.length };
+  }
   async runCortexAgent(_r: CortexAgentRequest): Promise<CortexAgentResult> { throw new Error("Cortex Agent is disabled until recursion and target allowlists are configured."); }
   async listCustomTools() { await this.queue.authorizeObservation({ title: "Read Snowflake custom tools", description: "Read the configured custom-tool allowlist." }); return cursor<CustomToolSummary>([]); }
   async runCustomTool(_r: CustomToolRequest): Promise<CustomToolResult> { throw new Error("Custom Snowflake tools are disabled until individually allowlisted and schema-validated."); }
   async proposeWrite(operation: "insert" | "update" | "merge", target: string, sql: string): Promise<SnowflakeWriteProposal> {
-    const p = this.policy(); const segments = target.split(".");
-    if (segments.length !== 3) throw new Error("Write target must be DATABASE.SCHEMA.TABLE.");
-    const table = qualified(segments[0], segments[1], segments[2]); allowed(p.tables, table, "Table");
-    if (!new RegExp(`^${operation}\\b`, "i").test(sql.trim()) || /\b(DROP|TRUNCATE|ALTER|CREATE|GRANT|REVOKE|CALL|DELETE)\b/i.test(sql)) throw new Error("Only bounded INSERT, UPDATE, or MERGE proposals are permitted.");
-    if (sql.length > MAX_SQL) throw new Error("SQL proposal exceeds the size limit.");
+    const p = this.policy();
+    const table = validateWriteProposal(p, operation, target, sql).table;
     const proposalId = crypto.randomUUID();
     const actionId = await this.gatekeeper.stageWrite({ proposalId, operation, target: table, sql });
     try {
@@ -182,6 +269,9 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
           "```",
         ].join("\n"),
         implementsRevert: false,
+        // Snowflake writes are not simulated: reads cannot reflect pending DML, so the agent must
+        // not keep working against pre-write state.
+        awaitDecision: true,
       });
     } catch (error) {
       // submitAction rejected the proposal (policy or transport): drop the staged record so no
