@@ -226,7 +226,10 @@ HTTP connect flow; the Workshop binding exposes the RPC vendor. A package may bu
 credentials, but OAuth connectors remain unavailable until their secrets and callback URL are
 configured. MCP Portal is intentionally hidden when `MCP_PORTAL_URL` is unset. A custom integration
 such as Snowflake should follow this outer-repository pattern and use `gatekeeper-kit` for credential
-fencing, observations, action approval, and simulation.
+fencing, observations, and simulation, and `@gadgets/stage` (`packages/stage`) for the durable
+approval-gated action ledger — the `staged → pending → approved/rejected` state machine with
+sequential durable ids, retire-not-delete rejection, and live+retired proposal lookups — instead of
+re-deriving it per Gatekeeper.
 
 ## Upgrade
 

@@ -168,6 +168,9 @@ importers:
 
   packages/gatekeeper-huggingface:
     dependencies:
+      '@gadgets/stage':
+        specifier: workspace:*
+        version: link:../stage
       '@gadgets/workshop-shared':
         specifier: workspace:*
         version: link:../../cloudflare-os/packages/workshop-shared
@@ -199,6 +202,9 @@ importers:
 
   packages/gatekeeper-snowflake:
     dependencies:
+      '@gadgets/stage':
+        specifier: workspace:*
+        version: link:../stage
       '@gadgets/workshop-shared':
         specifier: workspace:*
         version: link:../../cloudflare-os/packages/workshop-shared
@@ -227,6 +233,21 @@ importers:
       wrangler:
         specifier: 'catalog:'
         version: 4.130.0(@cloudflare/workers-types@5.20260910.1)
+
+  packages/stage:
+    devDependencies:
+      '@types/node':
+        specifier: 26.1.0
+        version: 26.1.0
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+      vite:
+        specifier: 7.3.6
+        version: 7.3.6(@types/node@26.1.0)(lightningcss@1.33.0)
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.10(@types/node@26.1.0)(@vitest/browser-preview@4.1.10)(jsdom@26.1.0(supports-color@10.2.2))(vite@7.3.6(@types/node@26.1.0)(lightningcss@1.33.0))
 
 packages:
 

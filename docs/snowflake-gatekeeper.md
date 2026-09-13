@@ -100,12 +100,16 @@ Moderate does not mean unrestricted execution. The read/write split is:
 | Stored procedure, INSERT/UPDATE/MERGE/DELETE, DDL, task/pipe changes, or any uncertain tool | `propose → simulate → request approval → apply → verify`; never execute from the read path. |
 | Destructive or administrative action (`DROP`, `TRUNCATE`, role/user grants, secret/key changes, warehouse resizing) | Not part of moderate; reject as unsupported. |
 
-Actions use Gatekeeper Kit `defineActions`/journal semantics and an authority
+Actions use the shared durable action ledger (`@gadgets/stage`) — the
+`staged → pending → approved/rejected` state machine with sequential ids from a
+durable counter, retire-not-delete rejection, and lookups across live and
+retired records — plus an authority
 fence tied to the credential generation and Snowflake role. The action payload
 must include the exact server/tool identifier, normalized scope, SQL or
 procedure name, bounded inputs, and an idempotency key derived from the stable
 action ID. Simulation must project pending changes accurately or declare the
-effect incomplete; rejection must remove the provisional state. Apply must
+effect incomplete; rejection retires the record as durable evidence of the
+decision. Apply must
 re-check the fence immediately before the provider call and verify the result
 afterward.
 

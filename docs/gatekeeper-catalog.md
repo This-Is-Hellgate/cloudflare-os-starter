@@ -27,6 +27,11 @@ Planned entries:
 | `snowflake` | outer `packages/gatekeeper-snowflake` (implemented, not yet deployed) | Snowflake-scoped credentials |
 | `huggingface` | outer `packages/gatekeeper-huggingface` (implemented, in the metadata catalog, not yet deployed) | Fine-grained Hub token / OAuth |
 
+Both outer Gatekeepers share the durable action ledger via `packages/stage`
+(`@gadgets/stage`): the `staged → pending → approved/rejected` state machine with sequential
+durable ids, retire-not-delete rejection, and live+retired proposal lookups. Vendor packages keep
+only their policy, error strings, and public proposal mapping.
+
 ## Unified implementation plan
 
 All integrations use the same Gatekeeper contract and are implemented in the outer Starter

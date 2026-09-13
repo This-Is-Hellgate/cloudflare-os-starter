@@ -3,6 +3,7 @@ import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import type { AccountDescription, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, ResourceConfiguratorFrame, ResourceDescription, SupportedResource, VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import type { CommitFileChange, DatasetQueryOptions, DiscussionSummary, HuggingFaceDatasetInfo, HuggingFaceFilePage, HuggingFaceModelCard, HuggingFaceRepository, HuggingFaceSession, HuggingFaceSpaceInfo, InferenceRequest, InferenceResult, InferenceTarget, WriteProposal } from "./types.js";
 import TYPES_CODE from "./types-code.js";
+import { Stage, type StageRecord } from "@gadgets/stage";
 
 const ICON = { url: "https://huggingface.co/front/assets/huggingface_logo-noborder.svg" };
 const RESOURCES: SupportedResource[] = [
@@ -14,18 +15,8 @@ const RESOURCES: SupportedResource[] = [
 type Resource = HuggingFaceRepository & { kind: "model" | "dataset" | "space" };
 type GatekeeperProps = { resourceUrl?: string };
 type Queue = Pick<ApprovalQueue, "authorizeObservation" | "submitAction"> & Partial<{ [Symbol.dispose](): void }>;
-type HuggingFaceActionState = "staged" | "pending" | "approved" | "rejected";
-type StoredHuggingFaceAction = {
-  proposalId: string;
-  actionId: number;
-  operation: WriteProposal["operation"];
-  summary: string;
-  data: unknown;
-  state: HuggingFaceActionState;
-  submittedAt: number;
-  appliedAt?: number;
-  rejectedAt?: number;
-};
+type HuggingFaceWriteAction = { proposalId: string; operation: WriteProposal["operation"]; summary: string; data: unknown };
+type StoredHuggingFaceAction = StageRecord<HuggingFaceWriteAction>;
 
 function parseResource(raw: string | undefined): Resource {
   if (!raw) throw new Error("HF_RESOURCE_URL is required for a Hugging Face binding.");
@@ -53,6 +44,8 @@ class HubClient {
 
 @validateRpc()
 export class HuggingFaceGatekeeper extends DurableObject<Env, GatekeeperProps> implements Gatekeeper<HuggingFaceSession> {
+  readonly #stage = new Stage<HuggingFaceWriteAction>({ kv: this.ctx.storage.kv, label: "Hugging Face" });
+
   #url(): string | undefined { return this.ctx.props?.resourceUrl ?? this.env.HF_RESOURCE_URL; }
   async describe(): Promise<ResourceDescription> { const r = parseResource(this.#url()); return { url: `https://huggingface.co/${r.kind === "model" ? "models" : r.kind === "dataset" ? "datasets" : "spaces"}/${r.id}`, title: `Hugging Face ${r.kind}`, snippet: `Scoped ${r.kind} repository capability`, suggestedBindingName: `HUGGINGFACE_${r.kind.toUpperCase()}`, tsType: "HuggingFaceSession" }; }
   async getTypeScriptTypes(): Promise<string> { return TYPES_CODE; }
@@ -62,7 +55,7 @@ export class HuggingFaceGatekeeper extends DurableObject<Env, GatekeeperProps> i
   async removeObserver(_id: string): Promise<void> {}
 
   async applyAction(actionId: number): Promise<void> {
-    const record = await this.#requireActionRecord(actionId);
+    const record = await this.#stage.require(actionId);
     // Idempotent on overseer re-delivery: a crash after the Hub write but before the overseer
     // recorded completion replays applyAction. The durable record is the only authority on
     // whether the mutation already ran, so an already-approved action reports success rather
@@ -73,63 +66,31 @@ export class HuggingFaceGatekeeper extends DurableObject<Env, GatekeeperProps> i
   }
 
   async rejectAction(actionId: number): Promise<void> {
-    const record = await this.#requireActionRecord(actionId);
+    const record = await this.#stage.require(actionId);
     if (record.state !== "pending" && record.state !== "staged") throw new Error(`Hugging Face action ${actionId} is no longer pending.`);
-    record.state = "rejected";
-    record.rejectedAt = Date.now();
     // Retire rather than delete: the record is the durable evidence that the proposal was
     // rejected, and getWriteProposal() must keep answering for it.
-    await this.ctx.storage.kv.delete(`action:${actionId}`);
-    await this.ctx.storage.kv.put(`retiredAction:${actionId}`, record);
+    await this.#stage.reject(actionId);
   }
 
   async revertAction(_actionId: number): Promise<void> { throw new Error("Hugging Face actions are not reversible after application."); }
 
-  async #nextActionId(): Promise<number> {
-    const key = "counter:action";
-    const value = ((await this.ctx.storage.kv.get<number>(key)) ?? 0) + 1;
-    await this.ctx.storage.kv.put(key, value);
-    return value;
-  }
-
-  async stageAction(action: Omit<StoredHuggingFaceAction, "actionId" | "state" | "submittedAt">): Promise<number> {
-    const id = await this.#nextActionId();
-    await this.ctx.storage.kv.put(`action:${id}`, { ...action, actionId: id, state: "staged", submittedAt: Date.now() } satisfies StoredHuggingFaceAction);
-    return id;
+  async stageAction(action: HuggingFaceWriteAction): Promise<number> {
+    return this.#stage.stage(action);
   }
 
   async markActionPending(actionId: number): Promise<void> {
-    const record = await this.#requireActionRecord(actionId);
-    record.state = "pending";
-    await this.ctx.storage.kv.put(`action:${actionId}`, record);
+    await this.#stage.markPending(actionId);
   }
 
   async discardStagedAction(actionId: number): Promise<void> {
-    const record = await this.#getActionRecord(actionId);
-    if (record?.state === "staged") await this.ctx.storage.kv.delete(`action:${actionId}`);
-  }
-
-  async #getActionRecord(actionId: number): Promise<StoredHuggingFaceAction | undefined> {
-    return (await this.ctx.storage.kv.get<StoredHuggingFaceAction>(`action:${actionId}`))
-      ?? (await this.ctx.storage.kv.get<StoredHuggingFaceAction>(`retiredAction:${actionId}`));
-  }
-
-  async #requireActionRecord(actionId: number): Promise<StoredHuggingFaceAction> {
-    const record = await this.#getActionRecord(actionId);
-    if (!record) throw new Error(`No queued Hugging Face action exists with id ${actionId}.`);
-    return record;
+    await this.#stage.discardStaged(actionId);
   }
 
   async findActionByProposalId(proposalId: string): Promise<WriteProposal | null> {
-    const live: StoredHuggingFaceAction[] = [];
-    for (const [, record] of await this.ctx.storage.kv.list<StoredHuggingFaceAction>({ prefix: "action:" })) live.push(record);
-    const retired: StoredHuggingFaceAction[] = [];
-    for (const [, record] of await this.ctx.storage.kv.list<StoredHuggingFaceAction>({ prefix: "retiredAction:" })) retired.push(record);
-    for (const record of [...live, ...retired]) {
-      if (record?.proposalId !== proposalId) continue;
-      return { proposalId, actionId: record.actionId, operation: record.operation, summary: record.summary, simulated: true };
-    }
-    return null;
+    const record = await this.#stage.findByProposalId(proposalId);
+    if (!record) return null;
+    return { proposalId, actionId: record.actionId, operation: record.operation, summary: record.summary, simulated: true };
   }
 }
 

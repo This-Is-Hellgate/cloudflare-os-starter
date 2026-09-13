@@ -6,6 +6,7 @@
   "main": "./src/index.ts",
   "scripts": {"types:check": "tsc --noEmit", "test:run": "vitest run"},
   "dependencies": {
+    "@gadgets/stage": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
     "capnweb": "catalog:",
     "capnweb-validate": "catalog:"
