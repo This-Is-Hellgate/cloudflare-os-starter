@@ -14,6 +14,18 @@ const RESOURCES: SupportedResource[] = [
 type Resource = HuggingFaceRepository & { kind: "model" | "dataset" | "space" };
 type GatekeeperProps = { resourceUrl?: string };
 type Queue = Pick<ApprovalQueue, "authorizeObservation" | "submitAction"> & Partial<{ [Symbol.dispose](): void }>;
+type HuggingFaceActionState = "staged" | "pending" | "approved" | "rejected";
+type StoredHuggingFaceAction = {
+  proposalId: string;
+  actionId: number;
+  operation: WriteProposal["operation"];
+  summary: string;
+  data: unknown;
+  state: HuggingFaceActionState;
+  submittedAt: number;
+  appliedAt?: number;
+  rejectedAt?: number;
+};
 
 function parseResource(raw: string | undefined): Resource {
   if (!raw) throw new Error("HF_RESOURCE_URL is required for a Hugging Face binding.");
@@ -41,7 +53,6 @@ class HubClient {
 
 @validateRpc()
 export class HuggingFaceGatekeeper extends DurableObject<Env, GatekeeperProps> implements Gatekeeper<HuggingFaceSession> {
-  #actions = new Map<number, unknown>();
   #url(): string | undefined { return this.ctx.props?.resourceUrl ?? this.env.HF_RESOURCE_URL; }
   async describe(): Promise<ResourceDescription> { const r = parseResource(this.#url()); return { url: `https://huggingface.co/${r.kind === "model" ? "models" : r.kind === "dataset" ? "datasets" : "spaces"}/${r.id}`, title: `Hugging Face ${r.kind}`, snippet: `Scoped ${r.kind} repository capability`, suggestedBindingName: `HUGGINGFACE_${r.kind.toUpperCase()}`, tsType: "HuggingFaceSession" }; }
   async getTypeScriptTypes(): Promise<string> { return TYPES_CODE; }
@@ -49,10 +60,77 @@ export class HuggingFaceGatekeeper extends DurableObject<Env, GatekeeperProps> i
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<HuggingFaceSession> { return new HuggingFaceSessionImpl(approvalQueue.dup(), this.env, this, this.#url()); }
   async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> { throw new Error("Hugging Face bindings require tracked observer verification before sharing."); }
   async removeObserver(_id: string): Promise<void> {}
-  async queueAction(actionId: number, action: unknown): Promise<void> { this.#actions.set(actionId, action); await this.ctx.storage.kv.put(`action:${actionId}`, action); }
-  async applyAction(actionId: number): Promise<void> { const action = this.#actions.get(actionId) ?? await this.ctx.storage.kv.get(`action:${actionId}`); if (!action) throw new Error(`Unknown Hugging Face action: ${actionId}`); throw new Error("Hugging Face write application is disabled until the action executor is enabled."); }
-  async rejectAction(actionId: number): Promise<void> { this.#actions.delete(actionId); await this.ctx.storage.kv.delete(`action:${actionId}`); }
+
+  async applyAction(actionId: number): Promise<void> {
+    const record = await this.#requireActionRecord(actionId);
+    // Idempotent on overseer re-delivery: a crash after the Hub write but before the overseer
+    // recorded completion replays applyAction. The durable record is the only authority on
+    // whether the mutation already ran, so an already-approved action reports success rather
+    // than throwing (which would strand the action as forever un-appliable).
+    if (record.state === "approved") return;
+    if (record.state !== "pending" && record.state !== "staged") throw new Error(`Hugging Face action ${actionId} is no longer pending.`);
+    throw new Error("Hugging Face write application is disabled until the action executor is enabled.");
+  }
+
+  async rejectAction(actionId: number): Promise<void> {
+    const record = await this.#requireActionRecord(actionId);
+    if (record.state !== "pending" && record.state !== "staged") throw new Error(`Hugging Face action ${actionId} is no longer pending.`);
+    record.state = "rejected";
+    record.rejectedAt = Date.now();
+    // Retire rather than delete: the record is the durable evidence that the proposal was
+    // rejected, and getWriteProposal() must keep answering for it.
+    await this.ctx.storage.kv.delete(`action:${actionId}`);
+    await this.ctx.storage.kv.put(`retiredAction:${actionId}`, record);
+  }
+
   async revertAction(_actionId: number): Promise<void> { throw new Error("Hugging Face actions are not reversible after application."); }
+
+  async #nextActionId(): Promise<number> {
+    const key = "counter:action";
+    const value = ((await this.ctx.storage.kv.get<number>(key)) ?? 0) + 1;
+    await this.ctx.storage.kv.put(key, value);
+    return value;
+  }
+
+  async stageAction(action: Omit<StoredHuggingFaceAction, "actionId" | "state" | "submittedAt">): Promise<number> {
+    const id = await this.#nextActionId();
+    await this.ctx.storage.kv.put(`action:${id}`, { ...action, actionId: id, state: "staged", submittedAt: Date.now() } satisfies StoredHuggingFaceAction);
+    return id;
+  }
+
+  async markActionPending(actionId: number): Promise<void> {
+    const record = await this.#requireActionRecord(actionId);
+    record.state = "pending";
+    await this.ctx.storage.kv.put(`action:${actionId}`, record);
+  }
+
+  async discardStagedAction(actionId: number): Promise<void> {
+    const record = await this.#getActionRecord(actionId);
+    if (record?.state === "staged") await this.ctx.storage.kv.delete(`action:${actionId}`);
+  }
+
+  async #getActionRecord(actionId: number): Promise<StoredHuggingFaceAction | undefined> {
+    return (await this.ctx.storage.kv.get<StoredHuggingFaceAction>(`action:${actionId}`))
+      ?? (await this.ctx.storage.kv.get<StoredHuggingFaceAction>(`retiredAction:${actionId}`));
+  }
+
+  async #requireActionRecord(actionId: number): Promise<StoredHuggingFaceAction> {
+    const record = await this.#getActionRecord(actionId);
+    if (!record) throw new Error(`No queued Hugging Face action exists with id ${actionId}.`);
+    return record;
+  }
+
+  async findActionByProposalId(proposalId: string): Promise<WriteProposal | null> {
+    const live: StoredHuggingFaceAction[] = [];
+    for (const [, record] of await this.ctx.storage.kv.list<StoredHuggingFaceAction>({ prefix: "action:" })) live.push(record);
+    const retired: StoredHuggingFaceAction[] = [];
+    for (const [, record] of await this.ctx.storage.kv.list<StoredHuggingFaceAction>({ prefix: "retiredAction:" })) retired.push(record);
+    for (const record of [...live, ...retired]) {
+      if (record?.proposalId !== proposalId) continue;
+      return { proposalId, actionId: record.actionId, operation: record.operation, summary: record.summary, simulated: true };
+    }
+    return null;
+  }
 }
 
 @validateRpc()
@@ -70,11 +148,35 @@ class HuggingFaceSessionImpl extends RpcTarget implements HuggingFaceSession {
   async queryDataset(_options?: DatasetQueryOptions): Promise<{ columns: string[]; rows: unknown[][]; rowCount: number; truncated: boolean }> { throw new Error("Dataset queries require an approved dataset query backend and are not enabled in this first Worker."); }
   async runInference(request: InferenceRequest): Promise<InferenceResult> { const r = this.#resource(); if (r.kind !== "model") throw new Error("Inference requires a bound model."); const input = boundedString(request.input, 64_000, "input"); const model = this.env.HF_INFERENCE_MODEL ?? r.id; const result = await this.#client().request(`https://router.huggingface.co/hf-inference/models/${encodeURIComponent(model)}`, { method: "POST", body: JSON.stringify({ inputs: input, parameters: request.parameters }) }); await this.queue.authorizeObservation({ title: "Run Hugging Face inference", description: `Run bounded inference on ${model}.` }); return { output: result, model, provider: this.env.HF_INFERENCE_PROVIDER, truncated: false }; }
   async listDiscussions(status?: "open" | "closed"): Promise<any> { const r = this.#resource(); let page = 0; const client = this.#client(); const first = await client.request(`https://huggingface.co/api/${r.kind === "model" ? "models" : r.kind === "dataset" ? "datasets" : "spaces"}/${r.id}/discussions?status=${status ?? "open"}&limit=100`); await this.queue.authorizeObservation({ title: "List Hugging Face discussions", description: `List bounded discussions for ${r.id}.` }); const items: DiscussionSummary[] = (Array.isArray(first) ? first : []).slice(0, 100).map((x: any) => ({ number: Number(x.num), title: String(x.title ?? "").slice(0, 300), status: x.status === "closed" ? "closed" : "open", kind: x.isPullRequest ? "pull_request" : "discussion", author: x.author?.name ? String(x.author.name).slice(0, 200) : undefined })); return { next: async () => page++ === 0 ? items : null }; }
-  async #proposal(operation: WriteProposal["operation"], summary: string, data: unknown): Promise<WriteProposal> { const proposalId = crypto.randomUUID(); const actionId = Date.now(); await this.gatekeeper.queueAction(actionId, { proposalId, operation, data }); await this.queue.submitAction(actionId, { title: "Hugging Face change", description: summary, implementsRevert: false }); return { proposalId, operation, summary, simulated: true }; }
-  async proposeCommit(message: string, changes: CommitFileChange[], revision?: string): Promise<WriteProposal> { if (!message || changes.length < 1 || changes.length > 50) throw new Error("A commit requires 1–50 changes."); boundedString(message, 500, "message"); for (const c of changes) { if (!c.path || c.path.includes("..") || c.path.startsWith("/") || c.path.length > 512) throw new Error("Invalid commit path."); if (c.content !== undefined) boundedString(c.content, 1_000_000, "file content"); } return this.#proposal("create_commit", `Propose a commit to ${this.#resource().id}.`, { message, changes, revision }); }
-  async proposeDiscussion(title: string, body: string, pullRequest = false): Promise<WriteProposal> { return this.#proposal("create_discussion", "Propose a Hugging Face discussion.", { title: boundedString(title, 300, "title"), body: boundedString(body, 20_000, "body"), pullRequest }); }
-  async proposeDiscussionComment(number: number, body: string): Promise<WriteProposal> { if (!Number.isInteger(number) || number < 1) throw new Error("Invalid discussion number."); return this.#proposal("comment_discussion", "Propose a Hugging Face discussion comment.", { number, body: boundedString(body, 20_000, "body") }); }
-  async proposeSpaceState(state: "pause" | "resume"): Promise<WriteProposal> { if (this.#resource().kind !== "space") throw new Error("Space state changes require a bound Space."); return this.#proposal(state === "pause" ? "pause_space" : "resume_space", `Propose to ${state} the Space.`, { state }); }
+  async #proposal(operation: WriteProposal["operation"], summary: string, data: unknown, detail: string): Promise<WriteProposal> {
+    const proposalId = crypto.randomUUID();
+    const actionId = await this.gatekeeper.stageAction({ proposalId, operation, summary, data });
+    try {
+      await this.queue.submitAction(actionId, {
+        title: `Hugging Face ${operation}`,
+        description: [
+          `Propose a **${operation}** on ${this.#resource().id}.`,
+          "",
+          detail,
+          "",
+          "This change has not been made on the Hub. It will be applied only if this action is approved.",
+        ].join("\n"),
+        implementsRevert: false,
+      });
+    } catch (error) {
+      // submitAction rejected the proposal (policy or transport): drop the staged record so no
+      // orphaned action id lingers, then propagate.
+      await this.gatekeeper.discardStagedAction(actionId);
+      throw error;
+    }
+    await this.gatekeeper.markActionPending(actionId);
+    return { proposalId, actionId, operation, summary, simulated: true };
+  }
+  async proposeCommit(message: string, changes: CommitFileChange[], revision?: string): Promise<WriteProposal> { if (!message || changes.length < 1 || changes.length > 50) throw new Error("A commit requires 1–50 changes."); boundedString(message, 500, "message"); for (const c of changes) { if (!c.path || c.path.includes("..") || c.path.startsWith("/") || c.path.length > 512) throw new Error("Invalid commit path."); if (c.content !== undefined) boundedString(c.content, 1_000_000, "file content"); } const detail = [`Commit message: ${message}`, `Revision: ${revision ?? "main"}`, `Changes (${changes.length}):`, ...changes.map(c => `- ${c.operation ?? "update"} \`${c.path}\`${c.content !== undefined ? ` (${c.content.length} bytes)` : ""}`)].join("\n"); return this.#proposal("create_commit", `Propose a commit to ${this.#resource().id}.`, { message, changes, revision }, detail); }
+  async proposeDiscussion(title: string, body: string, pullRequest = false): Promise<WriteProposal> { const t = boundedString(title, 300, "title"); const b = boundedString(body, 20_000, "body"); const detail = `${pullRequest ? "Pull request" : "Discussion"} titled "${t}" with body:\n\n${b.slice(0, 2000)}${b.length > 2000 ? "\n…(truncated)" : ""}`; return this.#proposal("create_discussion", "Propose a Hugging Face discussion.", { title: t, body: b, pullRequest }, detail); }
+  async proposeDiscussionComment(number: number, body: string): Promise<WriteProposal> { if (!Number.isInteger(number) || number < 1) throw new Error("Invalid discussion number."); const b = boundedString(body, 20_000, "body"); const detail = `Comment on discussion #${number}:\n\n${b.slice(0, 2000)}${b.length > 2000 ? "\n…(truncated)" : ""}`; return this.#proposal("comment_discussion", "Propose a Hugging Face discussion comment.", { number, body: b }, detail); }
+  async proposeSpaceState(state: "pause" | "resume"): Promise<WriteProposal> { if (this.#resource().kind !== "space") throw new Error("Space state changes require a bound Space."); return this.#proposal(state === "pause" ? "pause_space" : "resume_space", `Propose to ${state} the Space.`, { state }, `Set the Space runtime state to **${state}**.`); }
+  async getWriteProposal(proposalId: string): Promise<WriteProposal | null> { return this.gatekeeper.findActionByProposalId(proposalId); }
   [Symbol.dispose](): void { this.queue[Symbol.dispose]?.(); }
 }
 

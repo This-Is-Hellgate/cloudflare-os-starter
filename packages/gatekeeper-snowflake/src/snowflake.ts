@@ -95,15 +95,103 @@ type Props = { account?: string };
   async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> { return (this.ctx.exports as any).SnowflakeVerifier({}); }
 }
 @validateRpc() export class SnowflakeVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier { verify(): void {} }
+type SnowflakeActionState = "staged" | "pending" | "approved" | "rejected";
+type SnowflakeWriteAction = { proposalId: string; operation: "insert" | "update" | "merge"; target: string; sql: string };
+type StoredSnowflakeAction = SnowflakeWriteAction & {
+  actionId: number;
+  state: SnowflakeActionState;
+  submittedAt: number;
+  appliedAt?: number;
+  rejectedAt?: number;
+};
+
 @validateRpc() export class SnowflakeGatekeeper extends DurableObject<Env, Props> implements Gatekeeper<SnowflakeSession> {
   async describe(): Promise<ResourceDescription> { return { url: `snowflake://${this.ctx.props?.account ?? this.env.SNOWFLAKE_ACCOUNT}`, title: "Snowflake capability", snippet: "Bounded metadata, read-only SQL, Cortex, and approved custom tools.", suggestedBindingName: "SNOWFLAKE", tsType: "SnowflakeSession" }; }
   async getTypeScriptTypes() { return TYPES_CODE; } async getAutoApprovableActions(): Promise<[]> { return []; }
   async startSession(q: RpcStub<ApprovalQueue>): Promise<SnowflakeSession> { return new SessionImpl(q.dup(), this.env, this); }
   async addObserver() { throw new Error("Snowflake bindings require observer ACL verification before sharing."); }
   async removeObserver() {}
-  async applyAction() { throw new Error("Snowflake action executor is not enabled."); }
-  async rejectAction() {} async revertAction() { throw new Error("Snowflake actions are not reversible automatically."); }
+
+  async applyAction(actionId: number): Promise<void> {
+    const record = await this.#requireActionRecord(actionId);
+    // Idempotent on overseer re-delivery: a crash after the remote write but before the overseer
+    // recorded completion replays applyAction. The durable record is the only authority on
+    // whether the DML already ran, so an already-approved action reports success rather than
+    // throwing (which would strand the action as forever un-appliable).
+    if (record.state === "approved") return;
+    if (record.state !== "pending" && record.state !== "staged") throw new Error(`Snowflake action ${actionId} is no longer pending.`);
+    throw new Error("Snowflake action executor is not enabled.");
+  }
+
+  async rejectAction(actionId: number): Promise<void> {
+    const record = await this.#requireActionRecord(actionId);
+    if (record.state !== "pending" && record.state !== "staged") throw new Error(`Snowflake action ${actionId} is no longer pending.`);
+    record.state = "rejected";
+    record.rejectedAt = Date.now();
+    // Retire rather than delete: the record is the durable evidence that the proposal was
+    // rejected, and getWriteProposal() must keep answering for it.
+    await this.ctx.storage.kv.delete(`action:${actionId}`);
+    await this.ctx.storage.kv.put(`retiredAction:${actionId}`, record);
+  }
+
+  async revertAction() { throw new Error("Snowflake actions are not reversible automatically."); }
+
+  async #nextActionId(): Promise<number> {
+    const key = "counter:action";
+    const value = ((await this.ctx.storage.kv.get<number>(key)) ?? 0) + 1;
+    await this.ctx.storage.kv.put(key, value);
+    return value;
+  }
+
+  async #stageAction(action: SnowflakeWriteAction): Promise<number> {
+    const id = await this.#nextActionId();
+    await this.ctx.storage.kv.put(`action:${id}`, { ...action, actionId: id, state: "staged", submittedAt: Date.now() } satisfies StoredSnowflakeAction);
+    return id;
+  }
+
+  async #markActionPending(actionId: number): Promise<void> {
+    const record = await this.#requireActionRecord(actionId);
+    record.state = "pending";
+    await this.ctx.storage.kv.put(`action:${actionId}`, record);
+  }
+
+  async #getActionRecord(actionId: number): Promise<StoredSnowflakeAction | undefined> {
+    return (await this.ctx.storage.kv.get<StoredSnowflakeAction>(`action:${actionId}`))
+      ?? (await this.ctx.storage.kv.get<StoredSnowflakeAction>(`retiredAction:${actionId}`));
+  }
+
+  async #requireActionRecord(actionId: number): Promise<StoredSnowflakeAction> {
+    const record = await this.#getActionRecord(actionId);
+    if (!record) throw new Error(`No queued Snowflake action exists with id ${actionId}.`);
+    return record;
+  }
+
   async queueAction(id: number, action: unknown) { await this.ctx.storage.kv.put(`action:${id}`, action); }
+
+  async stageWrite(action: SnowflakeWriteAction): Promise<number> {
+    return this.#stageAction(action);
+  }
+
+  async markWritePending(actionId: number): Promise<void> {
+    await this.#markActionPending(actionId);
+  }
+
+  async discardStagedWrite(actionId: number): Promise<void> {
+    const record = await this.#getActionRecord(actionId);
+    if (record?.state === "staged") await this.ctx.storage.kv.delete(`action:${actionId}`);
+  }
+
+  async findWriteByProposalId(proposalId: string): Promise<SnowflakeWriteProposal | null> {
+    const live: StoredSnowflakeAction[] = [];
+    for (const [, record] of await this.ctx.storage.kv.list<StoredSnowflakeAction>({ prefix: "action:" })) live.push(record);
+    const retired: StoredSnowflakeAction[] = [];
+    for (const [, record] of await this.ctx.storage.kv.list<StoredSnowflakeAction>({ prefix: "retiredAction:" })) retired.push(record);
+    for (const record of [...live, ...retired]) {
+      if (record?.proposalId !== proposalId) continue;
+      return { proposalId, actionId: record.actionId, operation: record.operation, target: record.target, sql: record.sql, simulated: true };
+    }
+    return null;
+  }
 }
 @validateRpc() class SessionImpl extends RpcTarget implements SnowflakeSession {
   constructor(private readonly queue: RpcStub<ApprovalQueue>, private readonly env: Env, private readonly gatekeeper: SnowflakeGatekeeper) { super(); }
@@ -125,10 +213,33 @@ type Props = { account?: string };
     const table = qualified(segments[0], segments[1], segments[2]); allowed(p.tables, table, "Table");
     if (!new RegExp(`^${operation}\\b`, "i").test(sql.trim()) || /\b(DROP|TRUNCATE|ALTER|CREATE|GRANT|REVOKE|CALL|DELETE)\b/i.test(sql)) throw new Error("Only bounded INSERT, UPDATE, or MERGE proposals are permitted.");
     if (sql.length > MAX_SQL) throw new Error("SQL proposal exceeds the size limit.");
-    const id = Math.floor(Date.now() % 2_000_000_000); const proposalId = crypto.randomUUID();
-    await this.gatekeeper.queueAction(id, { proposalId, operation, target: table, sql });
-    await this.queue.submitAction(id, { title: "Snowflake data change", description: `Propose ${operation.toUpperCase()} on ${table}.`, implementsRevert: false });
-    return { proposalId, operation, target: table, sql, simulated: true };
+    const proposalId = crypto.randomUUID();
+    const actionId = await this.gatekeeper.stageWrite({ proposalId, operation, target: table, sql });
+    try {
+      await this.queue.submitAction(actionId, {
+        title: `Snowflake ${operation.toUpperCase()} on ${table}`,
+        description: [
+          `Propose a **${operation.toUpperCase()}** against Snowflake table \`${table}\`.`,
+          "",
+          "The statement below has not been executed. It will run only if this action is approved.",
+          "",
+          "```sql",
+          sql,
+          "```",
+        ].join("\n"),
+        implementsRevert: false,
+      });
+    } catch (error) {
+      // submitAction rejected the proposal (policy or transport): drop the staged record so no
+      // orphaned action id lingers, then propagate.
+      await this.gatekeeper.discardStagedWrite(actionId);
+      throw error;
+    }
+    await this.gatekeeper.markWritePending(actionId);
+    return { proposalId, actionId, operation, target: table, sql, simulated: true };
+  }
+  async getWriteProposal(proposalId: string): Promise<SnowflakeWriteProposal | null> {
+    return this.gatekeeper.findWriteByProposalId(proposalId);
   }
   [Symbol.dispose]() { this.queue[Symbol.dispose]?.(); }
 }

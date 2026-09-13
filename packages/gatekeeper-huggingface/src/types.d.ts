@@ -102,6 +102,8 @@ export interface DiscussionSummary {
 
 export interface WriteProposal {
   proposalId: string;
+  /** Sequential, Gatekeeper-assigned action id; the id the approval flow will call back with. */
+  actionId: number;
   operation: "create_commit" | "create_discussion" | "comment_discussion" | "pause_space" | "resume_space";
   summary: string;
   /** True when the proposal can be simulated without contacting a mutating endpoint. */
@@ -148,4 +150,6 @@ export interface HuggingFaceSession {
   proposeDiscussion(title: string, body: string, pullRequest?: boolean): Promise<WriteProposal>;
   proposeDiscussionComment(number: number, body: string): Promise<WriteProposal>;
   proposeSpaceState(state: "pause" | "resume"): Promise<WriteProposal>;
+  /** Read the durable state of a previously proposed change, or null when unknown. */
+  getWriteProposal(proposalId: string): Promise<WriteProposal | null>;
 }

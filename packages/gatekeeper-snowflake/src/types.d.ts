@@ -173,6 +173,8 @@ export interface CustomToolResult {
 
 export interface SnowflakeWriteProposal {
   proposalId: string;
+  /** Sequential, Gatekeeper-assigned action id; the id the approval flow will call back with. */
+  actionId: number;
   operation: "insert" | "update" | "merge";
   target: string;
   sql: string;
@@ -204,4 +206,6 @@ export interface SnowflakeSession {
   runCustomTool(request: CustomToolRequest): Promise<CustomToolResult>;
   /** Queue a bounded DML proposal; it is never sent to Snowflake during this call. */
   proposeWrite(operation: "insert" | "update" | "merge", target: string, sql: string): Promise<SnowflakeWriteProposal>;
+  /** Read the durable state of a previously proposed write, or null when unknown. */
+  getWriteProposal(proposalId: string): Promise<SnowflakeWriteProposal | null>;
 }
