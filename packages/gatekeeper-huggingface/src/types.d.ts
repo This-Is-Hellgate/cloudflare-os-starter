@@ -72,6 +72,28 @@ export interface DatasetQueryResult {
   truncated: boolean;
 }
 
+/** One bounded page of a dataset walk. */
+export interface DatasetPage {
+  rows: unknown[][];
+  rowCount: number;
+  /** Server-side row offset this page started at. */
+  offset: number;
+  /** True when the cumulative byte budget clipped rows from this page. */
+  truncated: boolean;
+}
+
+/**
+ * A live dataset query capability: the same verified, bounded contract as queryDataset, with the
+ * cumulative row/byte budget filling across server-side pages. Call next() until null.
+ */
+export interface DatasetQueryPages {
+  next(): Promise<DatasetPage | null>;
+  /** Column names as resolved from the dataset's first fetched page. */
+  getColumns(): Promise<string[]>;
+  /** Total rows the server reports for the resolved config/split. */
+  getTotalRows(): Promise<number>;
+}
+
 export interface InferenceTarget {
   model: string;
   provider?: string;
@@ -98,6 +120,8 @@ export interface DiscussionSummary {
   status: "open" | "closed";
   kind: "discussion" | "pull_request";
   author?: string;
+  /** ISO timestamp as reported by the Hub, when present. */
+  createdAt?: string;
 }
 
 export interface DiscussionComment {
@@ -147,6 +171,11 @@ export interface HuggingFaceSession {
   /** Read a bounded text/configuration file; binary/model weights are not returned inline. */
   readTextFile(path: string, revision?: string, maxBytes?: number): Promise<string>;
   queryDataset(options?: DatasetQueryOptions): Promise<DatasetQueryResult>;
+  /**
+   * Walk the same bounded dataset query across server-side pages: cumulative maxRows/maxBytes
+   * budgets fill across offset windows of at most 100 rows instead of stopping at the first one.
+   */
+  queryDatasetPages(options?: DatasetQueryOptions): Promise<DatasetQueryPages>;
 
   /** Run inference only against the explicitly bound model/provider target. */
   runInference(request: InferenceRequest): Promise<InferenceResult>;

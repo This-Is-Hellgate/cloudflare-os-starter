@@ -20,6 +20,16 @@ describe("snowflakePolicy", () => {
     expect(snowflakePolicy(env({ SNOWFLAKE_MAX_BYTES: "-5" })).maxBytes).toBe(2_000_000);
     expect(snowflakePolicy(env({ SNOWFLAKE_MAX_ROWS: "50" })).maxRows).toBe(50);
   });
+
+  it("clamps the result-paging profile to the documented ceilings", () => {
+    // Docs profile: pages of 100 rows (hard max 500), cursor walks of 10 pages (hard max 100).
+    const defaults = snowflakePolicy(env({}));
+    expect(defaults.resultRowsPerPage).toBe(100);
+    expect(defaults.maxResultPages).toBe(10);
+    expect(snowflakePolicy(env({ SNOWFLAKE_RESULT_ROWS_PER_PAGE: "4000" })).resultRowsPerPage).toBe(500);
+    expect(snowflakePolicy(env({ SNOWFLAKE_MAX_RESULT_PAGES: "4000" })).maxResultPages).toBe(100);
+    expect(snowflakePolicy(env({ SNOWFLAKE_RESULT_ROWS_PER_PAGE: "25" })).resultRowsPerPage).toBe(25);
+  });
 });
 
 describe("writesEnabled", () => {

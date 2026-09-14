@@ -15,6 +15,10 @@ interface Env {
   SNOWFLAKE_CORTEX_SEMANTIC_VIEWS?: string;
   /** Comma-separated allowlist of DATABASE.SCHEMA.SERVICE Cortex Search services. */
   SNOWFLAKE_CORTEX_SEARCH_SERVICES?: string;
+  /** Rows delivered per result page (docs profile: default 100, hard maximum 500). */
+  SNOWFLAKE_RESULT_ROWS_PER_PAGE?: string;
+  /** Service fetches one result cursor may make (docs profile: default 10, hard maximum 100). */
+  SNOWFLAKE_MAX_RESULT_PAGES?: string;
 }
 declare module "*.d.ts?raw" { const text: string; export default text; }
 declare namespace Cloudflare {

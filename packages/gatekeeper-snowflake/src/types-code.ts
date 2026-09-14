@@ -90,6 +90,36 @@ export interface ReadOnlySqlResult {
   elapsedMs: number;
 }
 
+/** One bounded page of a partitioned result walk. */
+export interface ReadOnlySqlPage {
+  rows: unknown[][];
+  rowCount: number;
+  truncated: boolean;
+  partitionsFetched: number;
+  deliveredRows: number;
+}
+
+/** The operator budget a result cursor walks within. */
+export interface ReadOnlySqlPageLimits {
+  rowsTotal: number;
+  bytesTotal: number;
+  rowsPerPage: number;
+  maxPages: number;
+}
+
+/**
+ * A live partitioned-result capability for one validated bounded SELECT: the same cumulative
+ * maxRows/maxBytes budgets as runReadOnlySql, filled across the partitions Snowflake's metadata
+ * promises instead of stopping at the first one. Call next() until null.
+ */
+export interface ReadOnlySqlPages {
+  next(): Promise<ReadOnlySqlPage | null>;
+  getQueryId(): Promise<string>;
+  getColumns(): Promise<SqlColumn[]>;
+  getTotalRows(): Promise<number | null>;
+  getLimits(): Promise<ReadOnlySqlPageLimits>;
+}
+
 export interface CortexAnalystRequest {
   /** The explicitly granted semantic view resource. */
   semanticView: string;
@@ -195,6 +225,8 @@ export interface SnowflakeSession {
 
   /** Execute a bounded SELECT against the explicitly scoped database/schema. */
   runReadOnlySql(sql: string, options: ReadOnlySqlOptions): Promise<ReadOnlySqlResult>;
+  /** Walk the same bounded SELECT across Snowflake's result partitions within the cumulative budgets. */
+  runReadOnlySqlPages(sql: string, options: ReadOnlySqlOptions): Promise<ReadOnlySqlPages>;
   cortexAnalyst(request: CortexAnalystRequest): Promise<CortexAnalystResult>;
   cortexSearch(request: CortexSearchRequest): Promise<CortexSearchResult>;
   /** Governed Snowflake Agent; recursion into this Gatekeeper is rejected. */

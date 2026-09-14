@@ -1,9 +1,10 @@
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import type { AccountDescription, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, ResourceConfiguratorFrame, ResourceDescription, SupportedResource, VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
-import type { CommitFileChange, DatasetQueryOptions, DatasetQueryResult, DiscussionSummary, HuggingFaceCursor, HuggingFaceDatasetInfo, HuggingFaceDiscussionDetail, HuggingFaceFilePage, HuggingFaceModelCard, HuggingFaceRepository, HuggingFaceSession, HuggingFaceSpaceInfo, InferenceRequest, InferenceResult, InferenceTarget, WriteProposal } from "./types.js";
+import type { CommitFileChange, DatasetPage, DatasetQueryOptions, DatasetQueryPages, DatasetQueryResult, DiscussionSummary, HuggingFaceCursor, HuggingFaceDatasetInfo, HuggingFaceDiscussionDetail, HuggingFaceFilePage, HuggingFaceModelCard, HuggingFaceRepository, HuggingFaceSession, HuggingFaceSpaceInfo, InferenceRequest, InferenceResult, InferenceTarget, WriteProposal } from "./types.js";
 import TYPES_CODE from "./types-code.js";
 import { Stage, GatedActions, proposeAction, type StageRecord } from "@gadgets/stage";
+import { LivePageSource, offsetPaged, type LivePage } from "@gadgets/cursor";
 
 const ICON = { url: "https://huggingface.co/front/assets/huggingface_logo-noborder.svg" };
 const RESOURCES: SupportedResource[] = [
@@ -45,15 +46,56 @@ class HubClient {
   }
 }
 
+/**
+ * The RPC surface of a live cursor capability. The walk mechanics — page budget, idempotent
+ * exhaustion, close, in-flight guard — live in @gadgets/cursor; this class is the thin transformed
+ * RpcTarget that hands them to the agent. The source is minted inside the governed session flow,
+ * so the capability it yields stays bound to that flow's resource identity and budgets.
+ */
 @validateRpc()
-class ArrayCursor<T> extends RpcTarget {
-  #index = 0;
-  constructor(private readonly items: T[], private readonly pageSize = 100) { super(); if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 1000) throw new Error("Invalid cursor page size."); }
-  async next(): Promise<T[] | null> {
-    const page = this.items.slice(this.#index, this.#index + this.pageSize);
-    this.#index += this.pageSize;
-    return page.length ? page : null;
+class HubCursor<T> extends RpcTarget {
+  constructor(private readonly source: LivePageSource<T>) { super(); }
+  next(): Promise<T[] | null> { return this.source.next(); }
+}
+
+/** Verified datasets-server paging constants: rows are fetched in windows of at most 100. */
+const DATASET_PAGE_ROWS = 100;
+
+/**
+ * Resolve the config/split pair: explicit options win, otherwise the first queryable split
+ * advertised by the approved datasets-server backend. Shared by both dataset query forms.
+ */
+async function resolveDatasetSplit(
+  client: HubClient,
+  resource: Resource,
+  options?: DatasetQueryOptions,
+): Promise<{ config: string; split: string }> {
+  let cfg = options?.config ? boundedString(options.config, 200, "config") : undefined;
+  let spl = options?.split ? boundedString(options.split, 200, "split") : undefined;
+  if (!cfg || !spl) {
+    const splits = await client.request(`https://datasets-server.huggingface.co/splits?dataset=${encodeURIComponent(resource.id)}`);
+    const first = Array.isArray((splits as any)?.splits) ? (splits as any).splits[0] : undefined;
+    cfg = cfg ?? (first?.config !== undefined ? String(first.config).slice(0, 200) : undefined);
+    spl = spl ?? (first?.split !== undefined ? String(first.split).slice(0, 200) : undefined);
   }
+  if (!cfg || !spl) throw new Error("Dataset has no queryable splits.");
+  return { config: cfg, split: spl };
+}
+
+/**
+ * The RPC surface of the dataset paging capability. Delegates walk mechanics to @gadgets/cursor;
+ * carries the resource's identity (columns, total) back to the agent through the minting closures.
+ */
+@validateRpc()
+class DatasetPagesCursor extends RpcTarget implements DatasetQueryPages {
+  constructor(
+    private readonly source: LivePageSource<DatasetPage>,
+    private readonly columns: () => string[],
+    private readonly totalRows: () => number,
+  ) { super(); }
+  next(): Promise<DatasetPage | null> { return this.source.next().then((pages) => pages?.[0] ?? null); }
+  getColumns(): Promise<string[]> { return Promise.resolve(this.columns()); }
+  getTotalRows(): Promise<number> { return Promise.resolve(this.totalRows()); }
 }
 
 @validateRpc()
@@ -167,17 +209,7 @@ class HuggingFaceSessionImpl extends RpcTarget implements HuggingFaceSession {
     const maxRows = boundedInt(options?.maxRows, 100, 1000);
     const maxBytes = boundedInt(options?.maxBytes, 1_000_000, 5_000_000);
     const client = this.#client();
-    // Resolve the config/split pair: explicit options win, otherwise the first queryable split
-    // advertised by the approved datasets-server backend.
-    let cfg = options?.config ? boundedString(options.config, 200, "config") : undefined;
-    let spl = options?.split ? boundedString(options.split, 200, "split") : undefined;
-    if (!cfg || !spl) {
-      const splits = await client.request(`https://datasets-server.huggingface.co/splits?dataset=${encodeURIComponent(r.id)}`);
-      const first = Array.isArray((splits as any)?.splits) ? (splits as any).splits[0] : undefined;
-      cfg = cfg ?? (first?.config !== undefined ? String(first.config).slice(0, 200) : undefined);
-      spl = spl ?? (first?.split !== undefined ? String(first.split).slice(0, 200) : undefined);
-    }
-    if (!cfg || !spl) throw new Error("Dataset has no queryable splits.");
+    const { config: cfg, split: spl } = await resolveDatasetSplit(client, r, options);
     const d = await client.request(`https://datasets-server.huggingface.co/rows?dataset=${encodeURIComponent(r.id)}&config=${encodeURIComponent(cfg)}&split=${encodeURIComponent(spl)}&offset=0&length=${Math.min(maxRows, 100)}`);
     const features = Array.isArray((d as any)?.features) ? (d as any).features : [];
     const rawRows = (Array.isArray((d as any)?.rows) ? (d as any).rows : []).slice(0, Math.min(maxRows, 100));
@@ -191,6 +223,64 @@ class HuggingFaceSessionImpl extends RpcTarget implements HuggingFaceSession {
     while (rows.length > 1 && JSON.stringify(rows).length > maxBytes) { rows.pop(); truncated = true; }
     await this.queue.authorizeObservation({ title: "Query Hugging Face dataset", description: `Read bounded rows from ${r.id} (${cfg}/${spl}).` });
     return { columns, rows, rowCount: rows.length, truncated };
+  }
+
+  /**
+   * The paging form of the dataset query: the same bounded, verified contract as queryDataset
+   * (fixed approved backend, config/split resolution, cumulative maxRows/maxBytes budgets), but
+   * the budget fills across server-side offset windows instead of stopping at the first one.
+   * Returns a live cursor capability whose `next()` delivers one bounded page per call; every
+   * page re-authorizes its observation through this session's approval queue.
+   */
+  async queryDatasetPages(options?: DatasetQueryOptions): Promise<DatasetQueryPages> {
+    const r = this.#resource();
+    if (r.kind !== "dataset") throw new Error("Dataset queries require a bound dataset.");
+    const maxRows = boundedInt(options?.maxRows, 100, 1000);
+    const maxBytes = boundedInt(options?.maxBytes, 1_000_000, 5_000_000);
+    const client = this.#client();
+    const { config: cfg, split: spl } = await resolveDatasetSplit(client, r, options);
+    await this.queue.authorizeObservation({ title: "Walk Hugging Face dataset pages", description: `Read bounded rows across pages from ${r.id} (${cfg}/${spl}).` });
+    const base = `https://datasets-server.huggingface.co/rows?dataset=${encodeURIComponent(r.id)}&config=${encodeURIComponent(cfg)}&split=${encodeURIComponent(spl)}`;
+
+    // Walk state: the server-side window offset (advances by what was FETCHED, so byte-clipped
+    // rows are never re-fetched) plus the cumulative row and byte budgets from policy.
+    let offset = 0;
+    let rowsBudget = maxRows;
+    let bytesBudget = maxBytes;
+    let columns: string[] | undefined;
+    let totalRows: number | undefined;
+    let fetchedLastWindow = 0;
+    let firstPage = true;
+
+    const fetchPage = async (): Promise<LivePage<DatasetPage>> => {
+      if (rowsBudget <= 0 || bytesBudget <= 0) return { items: [], exhausted: true };
+      const length = Math.min(DATASET_PAGE_ROWS, rowsBudget);
+      const d = await client.request(`${base}&offset=${offset}&length=${length}`);
+      await this.queue.authorizeObservation({ title: "Read Hugging Face dataset page", description: `Read a bounded page of rows from ${r.id} at offset ${offset}.` });
+      if (firstPage) {
+        const features = Array.isArray((d as any)?.features) ? (d as any).features : [];
+        columns = features.slice(0, 200).map((f: any) => String(f?.name ?? "")).filter(Boolean);
+        firstPage = false;
+      }
+      totalRows = Number((d as any)?.num_rows_total ?? 0);
+      const raw = Array.isArray((d as any)?.rows) ? (d as any).rows : [];
+      fetchedLastWindow = raw.length;
+      const rows: unknown[][] = raw.map((x: any) => { const obj = (x?.row ?? x) as Record<string, unknown> | undefined; return (columns ?? []).map((c: string) => obj?.[c]); });
+      // Cumulative byte budget: whole rows are dropped rather than truncated mid-value, and the
+      // page reports honestly when the budget clipped it.
+      let truncated = false;
+      while (rows.length > 0 && JSON.stringify(rows).length > bytesBudget) { rows.pop(); truncated = true; }
+      const encoded = JSON.stringify(rows).length;
+      bytesBudget -= encoded;
+      rowsBudget -= rows.length;
+      offset += fetchedLastWindow;
+      const page: DatasetPage = { rows, rowCount: rows.length, offset: offset - fetchedLastWindow, truncated };
+      const exhausted = rows.length === 0 || fetchedLastWindow < length || offset >= totalRows || rowsBudget <= 0 || bytesBudget <= 0;
+      return { items: [page], exhausted };
+    };
+
+    const source = new LivePageSource<DatasetPage>({ fetchPage, label: "Hugging Face dataset pages" });
+    return new DatasetPagesCursor(source, () => columns ?? [], () => totalRows ?? 0);
   }
   async runInference(request: InferenceRequest): Promise<InferenceResult> {
     const r = this.#resource();
@@ -220,12 +310,34 @@ class HuggingFaceSessionImpl extends RpcTarget implements HuggingFaceSession {
   async listDiscussions(status?: "open" | "closed"): Promise<HuggingFaceCursor<DiscussionSummary>> {
     const r = this.#resource();
     const client = this.#client();
-    const first = await client.request(apiPath(r, `/discussions?status=${status ?? "open"}&limit=100`));
     await this.queue.authorizeObservation({ title: "List Hugging Face discussions", description: `List bounded discussions for ${r.id}.` });
-    const items: DiscussionSummary[] = (Array.isArray(first) ? first : []).slice(0, 100).map((x: any) => ({ number: Number(x.num), title: String(x.title ?? "").slice(0, 300), status: x.status === "closed" ? "closed" : "open", kind: x.isPullRequest ? "pull_request" : "discussion", author: x.author?.name ? String(x.author.name).slice(0, 200) : undefined }));
+    // Contract verified against the live Hub endpoint (api/models|datasets|spaces/{id}/discussions):
+    // the response is { discussions: [...], count, start } — NOT a bare array — pages are dense in
+    // matching items, the page size is fixed at 50 (the limit parameter is ignored), and paging is
+    // a 0-based `p` offset. Exhaustion therefore comes from the reported count, never from page
+    // shortness, and the walk is bounded by the cursor's page budget.
+    const statusQuery = status === undefined ? "" : `&status=${status}`;
+    const source = offsetPaged<DiscussionSummary>({
+      pageSize: 50,
+      label: "Hugging Face discussions",
+      fetchPage: async (page) => {
+        const d = await client.request(apiPath(r, `/discussions?p=${page}${statusQuery}`));
+        await this.queue.authorizeObservation({ title: "Read Hugging Face discussions page", description: `Read a bounded page of discussions for ${r.id}.` });
+        const list = Array.isArray((d as any)?.discussions) ? (d as any).discussions : [];
+        const items: DiscussionSummary[] = list.slice(0, 100).map((x: any) => ({
+          number: Number(x.num),
+          title: String(x.title ?? "").slice(0, 300),
+          status: x.status === "closed" ? "closed" : "open",
+          kind: x.isPullRequest ? "pull_request" : "discussion",
+          author: x.author?.name ? String(x.author.name).slice(0, 200) : undefined,
+          createdAt: typeof x.createdAt === "string" ? x.createdAt.slice(0, 40) : undefined,
+        }));
+        return { items, total: Number((d as any)?.count ?? 0) };
+      },
+    });
     // A real Cap'n Web capability: the cursor is an RpcTarget stub the agent can keep calling,
-    // not a POJO that fails RPC serialization.
-    return new ArrayCursor<DiscussionSummary>(items);
+    // bound to this session's resource and approval queue, not a POJO that fails RPC serialization.
+    return new HubCursor<DiscussionSummary>(source);
   }
 
   async getDiscussion(number: number): Promise<HuggingFaceDiscussionDetail> {
@@ -243,7 +355,8 @@ class HuggingFaceSessionImpl extends RpcTarget implements HuggingFaceSession {
       comments: events.filter((e: any) => e?.type === "comment").slice(0, 100).map((e: any) => ({
         author: e.author?.name ? String(e.author.name).slice(0, 200) : undefined,
         body: String(e.data ?? "").slice(0, 20_000),
-        createdAt: typeof e.created_at === "string" ? e.created_at : undefined,
+        // Verified against the live endpoint: discussion events carry camelCase `createdAt`.
+        createdAt: typeof e.createdAt === "string" ? e.createdAt.slice(0, 40) : undefined,
       })),
     };
   }

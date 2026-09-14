@@ -138,14 +138,30 @@ describe("Snowflake API and capability surface", () => {
   });
 
   it("guards read-only SQL with the bounded SELECT policy", () => {
-    expect(source).toContain("Only bounded SELECT statements are permitted.");
+    // Statement validation is shared by both query forms via the pure boundedSelect module.
+    expect(source).toContain('from "./sql-pages.js"');
+    expect(source).toContain("boundedSelect(sql)");
     expect(source).toContain("allowed(p.databases, options.database, \"Database\")");
+  });
+
+  it("exposes partitioned results as a live capability within the cumulative budgets", () => {
+    expect(source).toContain("runReadOnlySqlPages");
+    // The walk delegates to the shared cursor runtime and the verified partition contract.
+    expect(source).toContain('from "@gadgets/cursor"');
+    expect(source).toContain("partitionPager(");
+    expect(source).toContain("api.partition(first.statementHandle ?? first.queryId, partition)");
+    // Same cumulative budgets and allowlist checks as the single-shot form; pages re-authorize.
+    expect(source).toContain("maxRows: p.maxRows, maxBytes: p.maxBytes");
+    expect(source).toContain("maxPages: p.maxResultPages");
+    expect(source).toContain("Read Snowflake query result pages");
+    // The single-shot form is preserved unchanged.
+    expect(source).toContain("api().sql(sql, options, p.maxRows, p.maxBytes)");
   });
 
   it("keeps types-code.ts hand-synced with types.d.ts", () => {
     const declarations = readFileSync(new URL("../src/types.d.ts", import.meta.url), "utf8");
     const code = readFileSync(new URL("../src/types-code.ts", import.meta.url), "utf8");
-    for (const marker of ["proposeWrite(operation: \"insert\" | \"update\" | \"merge\", target: string, sql: string): Promise<SnowflakeWriteProposal>", "getWriteProposal(proposalId: string): Promise<SnowflakeWriteProposal | null>", "runReadOnlySql(sql: string, options: ReadOnlySqlOptions): Promise<ReadOnlySqlResult>", "cortexAnalyst(request: CortexAnalystRequest): Promise<CortexAnalystResult>"]) {
+    for (const marker of ["proposeWrite(operation: \"insert\" | \"update\" | \"merge\", target: string, sql: string): Promise<SnowflakeWriteProposal>", "getWriteProposal(proposalId: string): Promise<SnowflakeWriteProposal | null>", "runReadOnlySql(sql: string, options: ReadOnlySqlOptions): Promise<ReadOnlySqlResult>", "runReadOnlySqlPages(sql: string, options: ReadOnlySqlOptions): Promise<ReadOnlySqlPages>", "cortexAnalyst(request: CortexAnalystRequest): Promise<CortexAnalystResult>"]) {
       expect(declarations).toContain(marker);
       expect(code).toContain(marker);
     }

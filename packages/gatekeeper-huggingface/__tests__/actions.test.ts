@@ -93,8 +93,24 @@ describe("Hugging Face proposal policy", () => {
     expect(session).toContain("boundedInt(options?.maxRows, 100, 1000)");
   });
 
-  it("returns a real Cap'n Web cursor for discussion listings", () => {
-    expect(session).toContain("new ArrayCursor<DiscussionSummary>(items)");
+  it("returns a real Cap'n Web cursor for discussion listings, backed by live paging", () => {
+    expect(session).toContain("new HubCursor<DiscussionSummary>(source)");
+    // The walk uses the verified Hub contract: fixed 50-item pages, p-numbered offsets, and the
+    // reported count as the exhaustion signal — not a prefetched, capped array.
+    expect(session).toContain("offsetPaged<DiscussionSummary>({");
+    expect(session).toContain("pageSize: 50");
+    expect(session).toContain("/discussions?p=${page}");
+  });
+
+  it("exposes dataset paging as a live capability within the cumulative budgets", () => {
+    expect(session).toContain("queryDatasetPages");
+    expect(session).toContain("new DatasetPagesCursor(source, () => columns ?? [], () => totalRows ?? 0)");
+    // Same cumulative budgets as the single-page form; pages never exceed 100 rows (verified
+    // server-side cap) and never exceed the total maxRows budget.
+    expect(session).toContain("boundedInt(options?.maxRows, 100, 1000)");
+    expect(session).toContain("Math.min(DATASET_PAGE_ROWS, rowsBudget)");
+    // Each fetched page is an authorized observation.
+    expect(session).toContain("Read a bounded page of rows");
   });
 
   it("routes governed inference through the router with bounded output", () => {

@@ -87,6 +87,44 @@ export interface ReadOnlySqlResult {
   elapsedMs: number;
 }
 
+/** One bounded page of a partitioned result walk. */
+export interface ReadOnlySqlPage {
+  rows: unknown[][];
+  rowCount: number;
+  /** True when the cumulative byte budget clipped rows from this page (whole rows dropped). */
+  truncated: boolean;
+  /** Partitions retrieved from the service so far, including the initial response. */
+  partitionsFetched: number;
+  /** Rows delivered across the whole walk so far, including this page. */
+  deliveredRows: number;
+}
+
+/** The operator budget a result cursor walks within. */
+export interface ReadOnlySqlPageLimits {
+  /** Cumulative rows the whole walk may deliver. */
+  rowsTotal: number;
+  /** Cumulative encoded bytes the whole walk may deliver. */
+  bytesTotal: number;
+  /** Rows delivered per page. */
+  rowsPerPage: number;
+  /** Service fetches the cursor may make. */
+  maxPages: number;
+}
+
+/**
+ * A live partitioned-result capability for one validated bounded SELECT. The same cumulative
+ * maxRows/maxBytes budgets as runReadOnlySql, filled across the partitions Snowflake's metadata
+ * promises instead of stopping at the first one. Call next() until null.
+ */
+export interface ReadOnlySqlPages {
+  next(): Promise<ReadOnlySqlPage | null>;
+  getQueryId(): Promise<string>;
+  getColumns(): Promise<SqlColumn[]>;
+  /** Total rows the server reports for the statement, when the response included it. */
+  getTotalRows(): Promise<number | null>;
+  getLimits(): Promise<ReadOnlySqlPageLimits>;
+}
+
 export interface CortexAnalystRequest {
   /** The explicitly granted semantic view resource. */
   semanticView: string;
@@ -192,6 +230,12 @@ export interface SnowflakeSession {
 
   /** Execute a bounded SELECT against the explicitly scoped database/schema. */
   runReadOnlySql(sql: string, options: ReadOnlySqlOptions): Promise<ReadOnlySqlResult>;
+  /**
+   * Walk the same bounded SELECT across Snowflake's result partitions: cumulative maxRows/maxBytes
+   * budgets fill across the partitions the server's metadata promises instead of stopping at the
+   * first one. Each fetched page is an authorized observation.
+   */
+  runReadOnlySqlPages(sql: string, options: ReadOnlySqlOptions): Promise<ReadOnlySqlPages>;
   cortexAnalyst(request: CortexAnalystRequest): Promise<CortexAnalystResult>;
   cortexSearch(request: CortexSearchRequest): Promise<CortexSearchResult>;
   /** Governed Snowflake Agent; recursion into this Gatekeeper is rejected. */

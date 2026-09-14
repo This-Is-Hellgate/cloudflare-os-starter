@@ -24,7 +24,17 @@ allowlists, and approval-gated DML through the shared Stage action ledger.
 - `runReadOnlySql` accepts only bounded `SELECT` statements (keyword blocklist for DML/DDL/PUT/GET),
   requires allowlisted database and schema, and enforces row/byte ceilings from policy
   (`SNOWFLAKE_MAX_ROWS` ≤ 10 000, `SNOWFLAKE_MAX_BYTES` ≤ 10 000 000). Whole rows are dropped until
-  the payload fits the byte budget; `truncated` reports the clipping honestly.
+  the payload fits the byte budget; `truncated` reports the clipping honestly. Its behavior is
+  unchanged by the paging capability below.
+- `runReadOnlySqlPages` walks the same bounded SELECT across Snowflake's result partitions. The
+  contract was verified against the official SQL API reference: the initial response reports
+  `resultSetMetaData.numRows` (the true total) and `partitionInfo[]` (each partition's rowCount),
+  and further partitions are retrieved with `GET /api/v2/statements/{handle}?partition={n}`.
+  Cumulative budgets are identical to the single-shot form; deliveries are sliced to
+  `SNOWFLAKE_RESULT_ROWS_PER_PAGE` (≤ 500) and the cursor's service fetches are bounded by
+  `SNOWFLAKE_MAX_RESULT_PAGES` (≤ 100), matching the docs profile. The capability is a real RPC
+  object minted inside the governed session (allowlist checks, per-page observation
+  authorization), with walk mechanics delegated to `@gadgets/cursor`.
 - Allowlist semantics: an empty set permits everything; a qualified entry (`DB.S.T`) matches only
   the exact full name; a bare entry (`T`) matches by last segment. `OTHER.S.T` can never ride on an
   allowlisted `DB.S.T`.

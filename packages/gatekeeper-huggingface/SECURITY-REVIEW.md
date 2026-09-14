@@ -40,8 +40,9 @@ errors, or enter agent-visible model output.
 | Account/resource metadata, model card, dataset/Space info | Read | `authorizeObservation()`, bounded fields, vendor payload treated as untrusted. |
 | File list and text read | Read | `authorizeObservation()`, path traversal rejection, byte/page limits; no executable interpretation. |
 | Dataset query | Read | `authorizeObservation()`, fixed dataset, config/split resolved via `/splits`, row/byte limits (`maxRows` ≤ 1000, `maxBytes` ≤ 5 MB), whole-row byte enforcement. |
+| Dataset page walk (`queryDatasetPages`) | Read | The same verified contract with the same cumulative budgets, filled across server-side offset windows of at most 100 rows (the verified `length` cap of `datasets-server`); every page is an authorized observation, and the walk is bounded by the shared cursor runtime's page budget. |
 | Inference | Read with external cost/side-effect risk | `authorizeObservation()` plus per-request budget/rate limit; fixed model/provider and output cap. Provider mode uses the governed `router.huggingface.co/v1/chat/completions` endpoint with reserved keys (`model`, `messages`, `max_tokens`) stripped from user parameters. |
-| Discussion listing and detail | Read | `authorizeObservation()`, bounded pages/comments; listing returns a Cap'n Web `RpcTarget` cursor. |
+| Discussion listing and detail | Read | `authorizeObservation()`, bounded pages/comments; listing returns a live `RpcTarget` cursor paging the verified Hub contract (response `{discussions, count}`, fixed 50-item pages, `p` offset, `count`-derived exhaustion) rather than a prefetched, capped array. |
 | Commit, discussion, comment, Space pause/resume | External write | `submitAction()`; simulate first, then only `applyAction()` after approval, followed by verification. Execution additionally requires the operator gate `HF_ENABLE_WRITES=true|1`; the stored payload is re-validated before any remote call and `markApproved` records completion in the durable ledger. |
 
 Write proposals must validate paths, message/body size, change count, and revision. Commits should

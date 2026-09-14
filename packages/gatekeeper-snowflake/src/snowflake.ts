@@ -8,6 +8,7 @@ import type {
 import type {
   SnowflakeAccount as SnowflakeAccountInfo, DatabaseSummary, SchemaSummary, TableSummary, TableDescription,
   ColumnDescription, SnowflakeCursor, ReadOnlySqlOptions, ReadOnlySqlResult,
+  ReadOnlySqlPageLimits, ReadOnlySqlPages,
   CortexAnalystRequest, CortexAnalystResult, CortexSearchRequest, CortexSearchResult, SearchResult,
   CortexAgentRequest, CortexAgentResult, CustomToolSummary, CustomToolRequest, CustomToolResult,
   SnowflakeWriteProposal,
@@ -15,6 +16,8 @@ import type {
 } from "./types.js";
 import TYPES_CODE from "./types-code.js";
 import { Stage, GatedActions, proposeAction, type StageRecord } from "@gadgets/stage";
+import { LivePageSource } from "@gadgets/cursor";
+import { boundedSelect, partitionPager, type PartitionMeta, type ReadOnlySqlPage } from "./sql-pages.js";
 import {
   allowed, boundedInt, boundedText, identifier, qualified, snowflakePolicy, validateWriteProposal,
   writesEnabled, MAX_QUESTION, MAX_SQL,
@@ -37,6 +40,28 @@ function cursor<T>(items: T[], size = 100): SnowflakeCursor<T> {
 }
 @validateRpc() class CursorImpl<T> extends RpcTarget implements SnowflakeCursor<T> { constructor(private readonly nextPage: () => T[] | null) { super(); } next(): Promise<T[] | null> { return Promise.resolve(this.nextPage()); } }
 
+/**
+ * The RPC surface of the partitioned-result capability. Walk mechanics — page budget, idempotent
+ * exhaustion, in-flight guard — are delegated to @gadgets/cursor; the minting session binds the
+ * capability to the validated statement, its budget, and the approval queue, so authority and
+ * resource identity survive the hand-off to the agent.
+ */
+@validateRpc()
+class SqlPagesCursor extends RpcTarget implements ReadOnlySqlPages {
+  constructor(
+    private readonly source: LivePageSource<ReadOnlySqlPage>,
+    private readonly queryId: string,
+    private readonly columns: { name: string; type: string }[],
+    private readonly totalRows: number | undefined,
+    private readonly limits: ReadOnlySqlPageLimits,
+  ) { super(); }
+  next(): Promise<ReadOnlySqlPage | null> { return this.source.next().then((pages) => pages?.[0] ?? null); }
+  getQueryId(): Promise<string> { return Promise.resolve(this.queryId); }
+  getColumns(): Promise<{ name: string; type: string }[]> { return Promise.resolve(this.columns); }
+  getTotalRows(): Promise<number | null> { return Promise.resolve(this.totalRows ?? null); }
+  getLimits(): Promise<ReadOnlySqlPageLimits> { return Promise.resolve(this.limits); }
+}
+
 class SnowflakeApi {
   constructor(private readonly env: Env) {}
   #base(): string {
@@ -52,16 +77,51 @@ class SnowflakeApi {
   // the credential's default role.
   async request(body: Record<string, unknown>) {
     const data = await this.#post("/api/v2/statements", { role: this.env.SNOWFLAKE_ROLE, ...body }, "Snowflake request");
+    return this.#resultSet(data);
+  }
+
+  /** Normalizes one ResultSet response, including the verified partition metadata. */
+  #resultSet(data: any) {
     const result = Array.isArray(data.data) ? data.data : [];
     const meta = Array.isArray(data.resultSetMetaData?.rowType) ? data.resultSetMetaData.rowType : [];
-    return { queryId: String(data.statementHandle ?? data.queryId ?? "unknown"), columns: meta.map((x: any) => ({ name: String(x.name ?? ""), type: String(x.type ?? "") })), rows: result };
+    const partitionInfo = Array.isArray(data.resultSetMetaData?.partitionInfo) ? data.resultSetMetaData.partitionInfo : [];
+    return {
+      queryId: String(data.statementHandle ?? data.queryId ?? "unknown"),
+      columns: meta.map((x: any) => ({ name: String(x.name ?? ""), type: String(x.type ?? "") })),
+      rows: result,
+      // Verified contract: numRows is the total the statement produced; partitionInfo describes
+      // every partition, the first being the one returned inline.
+      totalRows: typeof data.resultSetMetaData?.numRows === "number" ? data.resultSetMetaData.numRows : undefined,
+      partitions: partitionInfo.length
+        ? partitionInfo.map((x: any) => ({ rowCount: Number(x?.rowCount ?? 0), ...(typeof x?.uncompressedSize === "number" ? { uncompressedSize: x.uncompressedSize } : {}) }))
+        : undefined,
+      statementHandle: typeof data.statementHandle === "string" ? data.statementHandle : undefined,
+    };
   }
-  async sql(sql: string, options: ReadOnlySqlOptions, maxRows: number, maxBytes: number): Promise<ReadOnlySqlResult> {
-    const text = sql.trim().replace(/;+$/, "");
-    if (text.length > MAX_SQL || !/^SELECT\b/i.test(text) || /\b(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|COPY|CALL|USE|GRANT|REVOKE|PUT|GET)\b/i.test(text)) throw new Error("Only bounded SELECT statements are permitted.");
+
+  /** Retrieves one promised partition: GET /api/v2/statements/{handle}?partition={n}. */
+  async partition(handle: string, partition: number): Promise<{ rows: unknown[][] }> {
+    if (!/^[A-Za-z0-9-]+$/.test(handle)) throw new Error("Invalid Snowflake statement handle.");
+    if (!Number.isInteger(partition) || partition < 1) throw new Error("Invalid partition number.");
+    const response = await fetch(`${this.#base()}/api/v2/statements/${encodeURIComponent(handle)}?partition=${partition}`, {
+      headers: { authorization: `Bearer ${this.env.SNOWFLAKE_TOKEN}`, accept: "application/json" },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw new Error(`Snowflake partition fetch failed (${response.status}).`);
+    const data: any = await response.json();
+    return { rows: Array.isArray(data.data) ? data.data : [] };
+  }
+
+  /** Validates the statement and executes it, returning the first (possibly only) partition. */
+  async execute(sql: string, options: ReadOnlySqlOptions) {
+    const text = boundedSelect(sql);
     const db = identifier(options.database, "database"), schema = identifier(options.schema, "schema");
+    return this.request({ statement: text, timeout: boundedInt(options.timeoutSeconds, 30, 120), database: db, schema, warehouse: options.warehouse });
+  }
+
+  async sql(sql: string, options: ReadOnlySqlOptions, maxRows: number, maxBytes: number): Promise<ReadOnlySqlResult> {
     const startedAt = Date.now();
-    const result = await this.request({ statement: text, timeout: boundedInt(options.timeoutSeconds, 30, 120), database: db, schema, warehouse: options.warehouse });
+    const result = await this.execute(sql, options);
     const rowLimit = Math.min(maxRows, boundedInt(options.maxRows, maxRows, maxRows));
     const byteLimit = Math.min(maxBytes, boundedInt(options.maxBytes, maxBytes, maxBytes));
     let rows = result.rows.slice(0, rowLimit);
@@ -183,6 +243,39 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
   async listTables(database: string, schema: string) { const p = this.policy(); const q = qualified(database, schema); allowed(p.databases, database, "Database"); allowed(p.schemas, q, "Schema"); const x = await this.api().metadata(`SHOW TABLES IN SCHEMA ${q}`); const rows = (x.rows ?? []).slice(0, 1000).map((r: any[]) => ({ database: identifier(database, "database"), schema: identifier(schema, "schema"), name: String(r[1] ?? r[0] ?? ""), kind: "table" as const })); await this.queue.authorizeObservation({ title: "Read Snowflake tables", description: `Read tables in ${q}.` }); return cursor<TableSummary>(rows); }
   async describeTable(database: string, schema: string, table: string): Promise<TableDescription> { const p = this.policy(); const q = qualified(database, schema, table); allowed(p.tables, q, "Table"); const x = await this.api().metadata(`DESCRIBE TABLE ${q}`); const columns: ColumnDescription[] = (x.rows ?? []).slice(0, 1000).map((r: any[]) => ({ name: String(r[0] ?? ""), dataType: String(r[1] ?? ""), nullable: String(r[3] ?? "YES").toUpperCase() === "YES" })); await this.queue.authorizeObservation({ title: "Read Snowflake table description", description: `Read the schema for ${q}.` }); return { database: identifier(database, "database"), schema: identifier(schema, "schema"), name: identifier(table, "table"), kind: "table", columns }; }
   async runReadOnlySql(sql: string, options: ReadOnlySqlOptions): Promise<ReadOnlySqlResult> { const p = this.policy(); const q = qualified(options.database, options.schema); allowed(p.databases, options.database, "Database"); allowed(p.schemas, q, "Schema"); const out = await this.api().sql(sql, options, p.maxRows, p.maxBytes); await this.queue.authorizeObservation({ title: "Read Snowflake query result", description: `Read a bounded SELECT in ${q}.` }); return out; }
+
+  /**
+   * The paging form of the read-only query: the same validated, allowlisted bounded SELECT, with
+   * the same cumulative maxRows/maxBytes budgets — filled across the partitions Snowflake's
+   * verified metadata promises instead of stopping at the first one. Returns a live cursor
+   * capability; every fetched page re-authorizes its observation through this session's queue.
+   */
+  async runReadOnlySqlPages(sql: string, options: ReadOnlySqlOptions): Promise<ReadOnlySqlPages> {
+    const p = this.policy();
+    const q = qualified(options.database, options.schema);
+    allowed(p.databases, options.database, "Database");
+    allowed(p.schemas, q, "Schema");
+    const api = this.api();
+    const first = await api.execute(sql, options);
+    await this.queue.authorizeObservation({ title: "Read Snowflake query result pages", description: `Read a bounded SELECT in ${q}.` });
+    const pager = partitionPager(
+      { rows: first.rows, totalRows: first.totalRows, partitions: first.partitions },
+      { rowsPerPage: p.resultRowsPerPage, maxRows: p.maxRows, maxBytes: p.maxBytes },
+      (partition) => api.partition(first.statementHandle ?? first.queryId, partition),
+    );
+    const source = new LivePageSource<ReadOnlySqlPage>({
+      fetchPage: pager.fetchPage,
+      maxPages: p.maxResultPages,
+      label: "Snowflake result",
+    });
+    return new SqlPagesCursor(
+      source,
+      first.queryId,
+      first.columns,
+      pager.totalRows,
+      { rowsTotal: p.maxRows, bytesTotal: p.maxBytes, rowsPerPage: p.resultRowsPerPage, maxPages: p.maxResultPages },
+    );
+  }
   async cortexAnalyst(r: CortexAnalystRequest): Promise<CortexAnalystResult> {
     const p = this.policy();
     // Fail closed: Analyst runs only against operator-allowlisted semantic views.

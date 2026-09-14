@@ -12,6 +12,12 @@ const DEFAULT_BYTES = 2_000_000;
 // beyond a bounded ceiling, so a misconfigured value cannot unbound agent reads.
 const MAX_ROWS_CAP = 10_000;
 const MAX_BYTES_CAP = 10_000_000;
+// The paging profile from docs/snowflake-gatekeeper.md: result pages carry at most 500 rows, and
+// one cursor walk may fetch at most 100 pages. Defaults follow the same document.
+const DEFAULT_ROWS_PER_PAGE = 100;
+const DEFAULT_RESULT_PAGES = 10;
+const MAX_ROWS_PER_PAGE_CAP = 500;
+const MAX_RESULT_PAGES_CAP = 100;
 
 export interface SnowflakePolicy {
   databases: Set<string>;
@@ -21,6 +27,10 @@ export interface SnowflakePolicy {
   searchServices: Set<string>;
   maxRows: number;
   maxBytes: number;
+  /** Rows delivered per result page (docs profile: 100 default, 500 hard maximum). */
+  resultRowsPerPage: number;
+  /** Service fetches one result cursor may make (docs profile: 10 default, 100 hard maximum). */
+  maxResultPages: number;
 }
 
 const allow = (raw?: string) =>
@@ -41,6 +51,8 @@ export function snowflakePolicy(env: Env): SnowflakePolicy {
     searchServices: allow(env.SNOWFLAKE_CORTEX_SEARCH_SERVICES),
     maxRows: positiveInt(env.SNOWFLAKE_MAX_ROWS, DEFAULT_ROWS, MAX_ROWS_CAP),
     maxBytes: positiveInt(env.SNOWFLAKE_MAX_BYTES, DEFAULT_BYTES, MAX_BYTES_CAP),
+    resultRowsPerPage: positiveInt(env.SNOWFLAKE_RESULT_ROWS_PER_PAGE, DEFAULT_ROWS_PER_PAGE, MAX_ROWS_PER_PAGE_CAP),
+    maxResultPages: positiveInt(env.SNOWFLAKE_MAX_RESULT_PAGES, DEFAULT_RESULT_PAGES, MAX_RESULT_PAGES_CAP),
   };
 }
 
