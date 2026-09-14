@@ -3,7 +3,7 @@ import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import type { AccountDescription, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, ResourceConfiguratorFrame, ResourceDescription, SupportedResource, VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import type { CommitFileChange, DatasetQueryOptions, DatasetQueryResult, DiscussionSummary, HuggingFaceCursor, HuggingFaceDatasetInfo, HuggingFaceDiscussionDetail, HuggingFaceFilePage, HuggingFaceModelCard, HuggingFaceRepository, HuggingFaceSession, HuggingFaceSpaceInfo, InferenceRequest, InferenceResult, InferenceTarget, WriteProposal } from "./types.js";
 import TYPES_CODE from "./types-code.js";
-import { Stage, type StageRecord } from "@gadgets/stage";
+import { Stage, GatedActions, proposeAction, type StageRecord } from "@gadgets/stage";
 
 const ICON = { url: "https://huggingface.co/front/assets/huggingface_logo-noborder.svg" };
 const RESOURCES: SupportedResource[] = [
@@ -59,6 +59,7 @@ class ArrayCursor<T> extends RpcTarget {
 @validateRpc()
 export class HuggingFaceGatekeeper extends DurableObject<Env, GatekeeperProps> implements Gatekeeper<HuggingFaceSession> {
   readonly #stage = new Stage<HuggingFaceWriteAction>({ kv: this.ctx.storage.kv, label: "Hugging Face" });
+  readonly #gated = new GatedActions(this.#stage, "Hugging Face");
 
   #url(): string | undefined { return this.ctx.props?.resourceUrl ?? this.env.HF_RESOURCE_URL; }
   async describe(): Promise<ResourceDescription> { const r = parseResource(this.#url()); return { url: `https://huggingface.co/${r.kind === "model" ? "models" : r.kind === "dataset" ? "datasets" : "spaces"}/${r.id}`, title: `Hugging Face ${r.kind}`, snippet: `Scoped ${r.kind} repository capability`, suggestedBindingName: `HUGGINGFACE_${r.kind.toUpperCase()}`, tsType: "HuggingFaceSession" }; }
@@ -69,16 +70,11 @@ export class HuggingFaceGatekeeper extends DurableObject<Env, GatekeeperProps> i
   async removeObserver(_id: string): Promise<void> {}
 
   async applyAction(actionId: number): Promise<void> {
-    const record = await this.#stage.require(actionId);
-    // Idempotent on overseer re-delivery: a crash after the Hub write but before the overseer
-    // recorded completion replays applyAction. The durable record is the only authority on
-    // whether the mutation already ran, so an already-approved action reports success rather
-    // than throwing (which would strand the action as forever un-appliable).
-    if (record.state === "approved") return;
-    if (record.state !== "pending" && record.state !== "staged") throw new Error(`Hugging Face action ${actionId} is no longer pending.`);
-    if (!writesEnabled(this.env)) throw new Error("Hugging Face write application is disabled until the action executor is enabled.");
-    await this.#execute(record);
-    await this.#stage.markApproved(actionId);
+    await this.#gated.apply(actionId, {
+      writesEnabled: writesEnabled(this.env),
+      disabledMessage: "Hugging Face write application is disabled until the action executor is enabled.",
+      execute: (record) => this.#execute(record),
+    });
   }
 
   // The executor runs only behind an explicit operator gate (HF_ENABLE_WRITES) and after a human
@@ -125,10 +121,9 @@ export class HuggingFaceGatekeeper extends DurableObject<Env, GatekeeperProps> i
   }
 
   async rejectAction(actionId: number): Promise<void> {
-    const record = await this.#stage.require(actionId);
-    if (record.state !== "pending" && record.state !== "staged") throw new Error(`Hugging Face action ${actionId} is no longer pending.`);
-    // Retire rather than delete: the record is the durable evidence that the proposal was
-    // rejected, and getWriteProposal() must keep answering for it.
+    // Stage.reject itself gates on state and retires rather than deletes: the record is the
+    // durable evidence that the proposal was rejected, and getWriteProposal() must keep
+    // answering for it.
     await this.#stage.reject(actionId);
   }
 
@@ -253,28 +248,19 @@ class HuggingFaceSessionImpl extends RpcTarget implements HuggingFaceSession {
     };
   }
   async #proposal(operation: WriteProposal["operation"], summary: string, data: unknown, detail: string): Promise<WriteProposal> {
-    const proposalId = crypto.randomUUID();
-    const actionId = await this.gatekeeper.stageAction({ proposalId, operation, summary, data });
-    try {
-      await this.queue.submitAction(actionId, {
-        title: `Hugging Face ${operation}`,
-        description: [
-          `Propose a **${operation}** on ${this.#resource().id}.`,
-          "",
-          detail,
-          "",
-          "This change has not been made on the Hub. It will be applied only if this action is approved.",
-        ].join("\n"),
-        implementsRevert: false,
-      });
-    } catch (error) {
-      // submitAction rejected the proposal (policy or transport): drop the staged record so no
-      // orphaned action id lingers, then propagate.
-      await this.gatekeeper.discardStagedAction(actionId);
-      throw error;
-    }
-    await this.gatekeeper.markActionPending(actionId);
-    return { proposalId, actionId, operation, summary, simulated: true };
+    const payload: HuggingFaceWriteAction = { proposalId: crypto.randomUUID(), operation, summary, data };
+    const { actionId } = await proposeAction(this.gatekeeper, this.queue, payload, {
+      title: `Hugging Face ${operation}`,
+      description: [
+        `Propose a **${operation}** on ${this.#resource().id}.`,
+        "",
+        detail,
+        "",
+        "This change has not been made on the Hub. It will be applied only if this action is approved.",
+      ].join("\n"),
+      implementsRevert: false,
+    });
+    return { proposalId: payload.proposalId, actionId, operation, summary, simulated: true };
   }
   async proposeCommit(message: string, changes: CommitFileChange[], revision?: string): Promise<WriteProposal> { if (!message || changes.length < 1 || changes.length > 50) throw new Error("A commit requires 1–50 changes."); boundedString(message, 500, "message"); for (const c of changes) { if (!c.path || c.path.includes("..") || c.path.startsWith("/") || c.path.length > 512) throw new Error("Invalid commit path."); if (c.operation !== undefined && !["add", "update", "delete"].includes(c.operation)) throw new Error("Invalid commit operation."); if (c.content !== undefined) boundedString(c.content, 1_000_000, "file content"); } const detail = [`Commit message: ${message}`, `Revision: ${revision ?? "main"}`, `Changes (${changes.length}):`, ...changes.map(c => `- ${c.operation ?? "update"} \`${c.path}\`${c.content !== undefined ? ` (${c.content.length} bytes)` : ""}`)].join("\n"); return this.#proposal("create_commit", `Propose a commit to ${this.#resource().id}.`, { message, changes, revision }, detail); }
   async proposeDiscussion(title: string, body: string, pullRequest = false): Promise<WriteProposal> { const t = boundedString(title, 300, "title"); const b = boundedString(body, 20_000, "body"); const detail = `${pullRequest ? "Pull request" : "Discussion"} titled "${t}" with body:\n\n${b.slice(0, 2000)}${b.length > 2000 ? "\n…(truncated)" : ""}`; return this.#proposal("create_discussion", "Propose a Hugging Face discussion.", { title: t, body: b, pullRequest }, detail); }

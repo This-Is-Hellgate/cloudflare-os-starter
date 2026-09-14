@@ -34,14 +34,19 @@ describe("Hugging Face durable action model", () => {
     expect(gatekeeper).toContain("this.#stage.findByProposalId(proposalId)");
   });
 
-  it("keeps applyAction idempotent for overseer re-delivery", () => {
-    expect(gatekeeper).toContain('if (record.state === "approved") return;');
+  it("delegates the gated write lifecycle to the shared runtime", () => {
+    expect(gatekeeper).toContain('new GatedActions(this.#stage, "Hugging Face")');
+    // applyAction is the overseer's entry point; idempotency and state gating live in
+    // @gadgets/stage and are tested behaviorally there.
+    expect(gatekeeper).toContain("this.#gated.apply(actionId, {");
+    expect(gatekeeper).toContain("writesEnabled: writesEnabled(this.env)");
   });
 
   it("refuses to execute while the executor is disabled", () => {
     expect(gatekeeper).toContain("Hugging Face write application is disabled until the action executor is enabled.");
-    expect(gatekeeper).toContain("writesEnabled(this.env)");
-    expect(gatekeeper).toContain("this.#stage.markApproved(actionId)");
+    expect(gatekeeper).toContain("writesEnabled: writesEnabled(this.env)");
+    // Approval is recorded by the shared runtime only after the executor succeeds.
+    expect(gatekeeper).toContain("execute: (record) => this.#execute(record)");
   });
 
   it("executes approved actions only after verification of the stored payload", () => {
@@ -74,10 +79,9 @@ describe("Hugging Face proposal policy", () => {
     expect(session).toContain("Space state changes require a bound Space.");
   });
 
-  it("submits a human-decision description and rolls back the staged record on failure", () => {
+  it("submits a human-decision description while the shared runtime rolls back the staged record on failure", () => {
     expect(session).toContain("It will be applied only if this action is approved.");
-    expect(session).toContain("discardStagedAction");
-    expect(session).toContain("markActionPending");
+    expect(session).toContain("proposeAction(this.gatekeeper, this.queue, payload,");
   });
 
   it("returns the durable actionId on the proposal", () => {

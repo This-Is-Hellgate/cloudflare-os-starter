@@ -36,12 +36,17 @@ describe("Snowflake durable action model", () => {
     expect(gatekeeper).toContain("this.#stage.findByProposalId(proposalId)");
   });
 
-  it("keeps applyAction idempotent for overseer re-delivery", () => {
-    expect(gatekeeper).toContain('if (record.state === "approved") return;');
+  it("delegates the gated write lifecycle to the shared runtime", () => {
+    expect(gatekeeper).toContain('new GatedActions(this.#stage, "Snowflake")');
+    // applyAction is the overseer's entry point; idempotency and state gating live in
+    // @gadgets/stage and are tested behaviorally there.
+    expect(gatekeeper).toContain("this.#gated.apply(actionId, {");
+    expect(gatekeeper).toContain("writesEnabled: writesEnabled(this.env)");
+    // The session-side stage/submit/discard/mark-pending dance lives in proposeAction.
+    expect(gatekeeper).not.toMatch(/catch \(error\)/);
   });
 
   it("refuses to execute while the executor is disabled", () => {
-    expect(gatekeeper).toContain("writesEnabled(this.env)");
     expect(gatekeeper).toContain("Snowflake action executor is not enabled.");
   });
 
@@ -55,14 +60,15 @@ describe("Snowflake durable action model", () => {
     expect(gatekeeper).toContain("this.env.SNOWFLAKE_WAREHOUSE ? { warehouse: this.env.SNOWFLAKE_WAREHOUSE }");
   });
 
-  it("marks the durable record approved only after the remote write succeeds", () => {
-    expect(gatekeeper).toContain("await this.#execute(record);");
-    expect(gatekeeper).toContain("await this.#stage.markApproved(actionId);");
+  it("executes the approved DML only through the executor callback, whose success the shared runtime records", () => {
+    expect(gatekeeper).toContain("statement: record.sql");
+    expect(gatekeeper).toContain("this.env.SNOWFLAKE_WAREHOUSE ? { warehouse: this.env.SNOWFLAKE_WAREHOUSE }");
+    expect(gatekeeper).toContain("execute: (record) => this.#execute(record)");
   });
 
   it("maps stored records onto the public write proposal with honest state", () => {
     expect(gatekeeper).toContain("simulated: record.state !== \"approved\"");
-    expect(gatekeeper).toContain("findWriteByProposalId");
+    expect(gatekeeper).toContain("findActionByProposalId");
   });
 });
 
@@ -71,6 +77,10 @@ describe("Snowflake write proposal policy", () => {
 
   it("routes fresh proposals through the shared validation authority", () => {
     expect(session).toContain("validateWriteProposal(p, operation, target, sql)");
+  });
+
+  it("routes fresh proposals through the shared proposeAction lifecycle", () => {
+    expect(session).toContain("proposeAction(this.gatekeeper, this.queue, payload,");
   });
 
   it("keeps the operation and destructive-keyword rules in the policy module", () => {
@@ -87,10 +97,9 @@ describe("Snowflake write proposal policy", () => {
     expect(policySource).toContain("SQL proposal exceeds the size limit.");
   });
 
-  it("submits a human-decision description and rolls back the staged record on failure", () => {
+  it("submits a human-decision description while the shared runtime rolls back the staged record on failure", () => {
     expect(session).toContain("It will run only if this action is approved.");
-    expect(session).toContain("discardStagedWrite");
-    expect(session).toContain("markWritePending");
+    expect(session).toContain("implementsRevert: false");
   });
 
   it("pauses the agent until the human decision lands (writes are not simulated)", () => {

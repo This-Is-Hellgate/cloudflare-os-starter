@@ -14,7 +14,7 @@ import type {
   SnowflakeSession,
 } from "./types.js";
 import TYPES_CODE from "./types-code.js";
-import { Stage, type StageRecord } from "@gadgets/stage";
+import { Stage, GatedActions, proposeAction, type StageRecord } from "@gadgets/stage";
 import {
   allowed, boundedInt, boundedText, identifier, qualified, snowflakePolicy, validateWriteProposal,
   writesEnabled, MAX_QUESTION, MAX_SQL,
@@ -101,6 +101,7 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
 
 @validateRpc() export class SnowflakeGatekeeper extends DurableObject<Env, Props> implements Gatekeeper<SnowflakeSession> {
   readonly #stage = new Stage<SnowflakeWriteAction>({ kv: this.ctx.storage.kv, label: "Snowflake" });
+  readonly #gated = new GatedActions(this.#stage, "Snowflake");
 
   async describe(): Promise<ResourceDescription> { return { url: `snowflake://${this.ctx.props?.account ?? this.env.SNOWFLAKE_ACCOUNT}`, title: "Snowflake capability", snippet: "Bounded metadata, read-only SQL, Cortex Analyst/Search, and approval-gated data actions.", suggestedBindingName: "SNOWFLAKE", tsType: "SnowflakeSession" }; }
   async getTypeScriptTypes() { return TYPES_CODE; } async getAutoApprovableActions(): Promise<[]> { return []; }
@@ -109,16 +110,11 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
   async removeObserver() {}
 
   async applyAction(actionId: number): Promise<void> {
-    const record = await this.#stage.require(actionId);
-    // Idempotent on overseer re-delivery: a crash after the remote write but before the overseer
-    // recorded completion replays applyAction. The durable record is the only authority on
-    // whether the DML already ran, so an already-approved action reports success rather than
-    // throwing (which would strand the action as forever un-appliable).
-    if (record.state === "approved") return;
-    if (record.state !== "pending" && record.state !== "staged") throw new Error(`Snowflake action ${actionId} is no longer pending.`);
-    if (!writesEnabled(this.env)) throw new Error("Snowflake action executor is not enabled.");
-    await this.#execute(record);
-    await this.#stage.markApproved(actionId);
+    await this.#gated.apply(actionId, {
+      writesEnabled: writesEnabled(this.env),
+      disabledMessage: "Snowflake action executor is not enabled.",
+      execute: (record) => this.#execute(record),
+    });
   }
 
   // The executor runs only behind an explicit operator gate (SNOWFLAKE_ENABLE_WRITES) and after a
@@ -137,28 +133,27 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
   }
 
   async rejectAction(actionId: number): Promise<void> {
-    const record = await this.#stage.require(actionId);
-    if (record.state !== "pending" && record.state !== "staged") throw new Error(`Snowflake action ${actionId} is no longer pending.`);
-    // Retire rather than delete: the record is the durable evidence that the proposal was
-    // rejected, and getWriteProposal() must keep answering for it.
+    // Stage.reject itself gates on state and retires rather than deletes: the record is the
+    // durable evidence that the proposal was rejected, and getWriteProposal() must keep
+    // answering for it.
     await this.#stage.reject(actionId);
   }
 
   async revertAction() { throw new Error("Snowflake actions are not reversible automatically."); }
 
-  async stageWrite(action: SnowflakeWriteAction): Promise<number> {
+  async stageAction(action: SnowflakeWriteAction): Promise<number> {
     return this.#stage.stage(action);
   }
 
-  async markWritePending(actionId: number): Promise<void> {
+  async markActionPending(actionId: number): Promise<void> {
     await this.#stage.markPending(actionId);
   }
 
-  async discardStagedWrite(actionId: number): Promise<void> {
+  async discardStagedAction(actionId: number): Promise<void> {
     await this.#stage.discardStaged(actionId);
   }
 
-  async findWriteByProposalId(proposalId: string): Promise<SnowflakeWriteProposal | null> {
+  async findActionByProposalId(proposalId: string): Promise<SnowflakeWriteProposal | null> {
     const record = await this.#stage.findByProposalId(proposalId);
     if (!record) return null;
     // Honest state: once the executor has applied the DML it is no longer simulated.
@@ -254,36 +249,27 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
   async proposeWrite(operation: "insert" | "update" | "merge", target: string, sql: string): Promise<SnowflakeWriteProposal> {
     const p = this.policy();
     const table = validateWriteProposal(p, operation, target, sql).table;
-    const proposalId = crypto.randomUUID();
-    const actionId = await this.gatekeeper.stageWrite({ proposalId, operation, target: table, sql });
-    try {
-      await this.queue.submitAction(actionId, {
-        title: `Snowflake ${operation.toUpperCase()} on ${table}`,
-        description: [
-          `Propose a **${operation.toUpperCase()}** against Snowflake table \`${table}\`.`,
-          "",
-          "The statement below has not been executed. It will run only if this action is approved.",
-          "",
-          "```sql",
-          sql,
-          "```",
-        ].join("\n"),
-        implementsRevert: false,
-        // Snowflake writes are not simulated: reads cannot reflect pending DML, so the agent must
-        // not keep working against pre-write state.
-        awaitDecision: true,
-      });
-    } catch (error) {
-      // submitAction rejected the proposal (policy or transport): drop the staged record so no
-      // orphaned action id lingers, then propagate.
-      await this.gatekeeper.discardStagedWrite(actionId);
-      throw error;
-    }
-    await this.gatekeeper.markWritePending(actionId);
-    return { proposalId, actionId, operation, target: table, sql, simulated: true };
+    const payload: SnowflakeWriteAction = { proposalId: crypto.randomUUID(), operation, target: table, sql };
+    const { actionId } = await proposeAction(this.gatekeeper, this.queue, payload, {
+      title: `Snowflake ${operation.toUpperCase()} on ${table}`,
+      description: [
+        `Propose a **${operation.toUpperCase()}** against Snowflake table \`${table}\`.`,
+        "",
+        "The statement below has not been executed. It will run only if this action is approved.",
+        "",
+        "```sql",
+        sql,
+        "```",
+      ].join("\n"),
+      implementsRevert: false,
+      // Snowflake writes are not simulated: reads cannot reflect pending DML, so the agent must
+      // not keep working against pre-write state.
+      awaitDecision: true,
+    });
+    return { ...payload, actionId, simulated: true };
   }
   async getWriteProposal(proposalId: string): Promise<SnowflakeWriteProposal | null> {
-    return this.gatekeeper.findWriteByProposalId(proposalId);
+    return this.gatekeeper.findActionByProposalId(proposalId);
   }
   [Symbol.dispose]() { this.queue[Symbol.dispose]?.(); }
 }
