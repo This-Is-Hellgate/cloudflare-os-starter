@@ -9,10 +9,12 @@ has a stable ID, package directory, Router binding, URL prefix, and authenticati
 configuration file contains an explicit enablement and Worker name for every entry; all are
 disabled by default.
 
-This first milestone deliberately does not deploy these integrations. Before an entry is enabled,
-the deployment generator must add its Worker config and both service bindings (Workshop RPC and
-Router HTTP), verify its package-level Wrangler configuration, and define its secret/configuration
-contract. A disabled entry must not create a Worker, binding, credential requirement, or public
+The upstream entries are not deployable yet. The two outer Gatekeepers (`snowflake`,
+`huggingface`) are wired into the deployment generator: enabling one in `deployment.jsonc` (with a
+Worker name) emits its Worker config from the package's own `wrangler.jsonc`, adds both service
+bindings (Workshop RPC and Router HTTP), and lists its required secrets so wrangler refuses to
+deploy until they are installed. Enabling an entry the generator cannot yet wire is rejected
+loudly. A disabled entry must not create a Worker, binding, credential requirement, or public
 route.
 
 Planned entries:
@@ -24,8 +26,8 @@ Planned entries:
 | `cloudflare` | upstream `gatekeeper-cloudflare` | OAuth 2.0 |
 | `mcp` | upstream `gatekeeper-mcp` | User-supplied endpoint |
 | `mcpPortal` | upstream `gatekeeper-mcp-portal` | Admin-configured portal |
-| `snowflake` | outer `packages/gatekeeper-snowflake` (implemented, not yet deployed) | Snowflake-scoped credentials |
-| `huggingface` | outer `packages/gatekeeper-huggingface` (implemented, in the metadata catalog, not yet deployed) | Fine-grained Hub token / OAuth |
+| `snowflake` | outer `packages/gatekeeper-snowflake` (implemented, deployable when enabled) | Snowflake-scoped credentials |
+| `huggingface` | outer `packages/gatekeeper-huggingface` (implemented, in the metadata catalog, deployable when enabled) | Fine-grained Hub token / OAuth |
 
 Both outer Gatekeepers share the durable action ledger via `packages/stage`
 (`@gadgets/stage`): the `staged → pending → approved/rejected` state machine with sequential

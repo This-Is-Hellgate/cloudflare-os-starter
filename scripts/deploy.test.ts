@@ -2,11 +2,16 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { parse, type ParseError } from "jsonc-parser";
-import { aiGatewayPlan, buildCommands, generateConfigs, validateConfig } from "./deploy.ts";
+import { aiGatewayPlan, buildCommands, enabledWiredGatekeepers, generateConfigs, validateConfig } from "./deploy.ts";
+import {
+  GATEKEEPER_REQUIRED_SECRETS,
+  OPTIONAL_GATEKEEPER_CATALOG,
+} from "./deployment-config.ts";
 import type {
   BaseConfigs,
   DeploymentConfig,
   GeneratedConfigs,
+  OptionalGatekeeperId,
   ProdWranglerConfig,
 } from "./deployment-config.ts";
 
@@ -84,7 +89,13 @@ async function baseConfigs(): Promise<BaseConfigs> {
     scheduler: await baseConfig("../cloudflare-os/packages/gatekeeper-scheduler/wrangler.jsonc"),
     customGatekeeper: await baseConfig("../packages/custom-gatekeeper/wrangler.jsonc"),
     errorReporter: await baseConfig("../packages/error-reporter/wrangler.jsonc"),
+    gatekeepers: {},
   };
+}
+
+/** The package-level `wrangler.jsonc` of one optional Gatekeeper, read from the catalog. */
+async function gatekeeperBase(id: OptionalGatekeeperId): Promise<ProdWranglerConfig> {
+  return baseConfig(`../${OPTIONAL_GATEKEEPER_CATALOG[id].packageDir}/wrangler.jsonc`);
 }
 
 // Parsed the way `deploy.ts` parses it, errors included. Swallowing them would let a base config
@@ -351,7 +362,11 @@ test("deploys the ambient Scheduler Gatekeeper the hosted flow preinstalls", asy
 
 test("keeps every Worker behind the router off the public internet", async () => {
   const generated = generateConfigs(validConfig, await baseConfigs());
-  const workers = Object.entries(generated) as [string, ProdWranglerConfig][];
+  const workers = [
+    ...(Object.entries(generated) as [string, ProdWranglerConfig][])
+      .filter(([name]) => name !== "gatekeepers"),
+    ...(Object.entries(generated.gatekeepers) as [string, ProdWranglerConfig][]),
+  ];
 
   for (const [name, worker] of workers) {
     if (name !== "router") {
@@ -647,4 +662,91 @@ test("skips the Error Reporter build when error reporting is disabled", () => {
   });
   const commands = buildCommands(config).map(({ args }) => args.join(" "));
   assert.equal(commands.some((command) => command.includes("error-reporter")), false);
+});
+
+// ---------------------------------------------------------------------------
+// Optional Gatekeeper deployment wiring
+
+test("emits Worker config, bindings, and secrets for an enabled wired Gatekeeper", async () => {
+  const config = variant((c) => {
+    c.gatekeepers.snowflake = { enabled: true, workerName: "acme-snowflake" };
+  });
+  const bases = await baseConfigs();
+  bases.gatekeepers.snowflake = await gatekeeperBase("snowflake");
+  const generated = generateConfigs(config, bases);
+
+  // The Worker config is the package's own base, renamed and pinned to the deployment.
+  const snowflake = generated.gatekeepers.snowflake!;
+  assert.equal(snowflake.name, "acme-snowflake");
+  assert.equal(snowflake.account_id, config.accountId);
+  assert.deepEqual(snowflake.migrations, bases.gatekeepers.snowflake!.migrations);
+  assert.deepEqual(snowflake.secrets, {
+    required: [...GATEKEEPER_REQUIRED_SECRETS.snowflake!],
+  });
+
+  // Bound into the Router for HTTP /gatekeeper/<name> and the Workshop for vendor RPC.
+  assert.ok(generated.router.services!.some(
+    (service) => service.binding === "GATEKEEPER_SNOWFLAKE" && service.service === "acme-snowflake"));
+  assert.ok(generated.workshop.services!.some(
+    (service) => service.binding === "GATEKEEPER_SNOWFLAKE" &&
+      service.service === "acme-snowflake" && service.entrypoint === "GatekeeperVendor"));
+});
+
+test("an enabled Hugging Face Gatekeeper carries the same wiring shape", async () => {
+  const config = variant((c) => {
+    c.gatekeepers.huggingface = { enabled: true, workerName: "acme-hf" };
+  });
+  const bases = await baseConfigs();
+  bases.gatekeepers.huggingface = await gatekeeperBase("huggingface");
+  const generated = generateConfigs(config, bases);
+
+  const hf = generated.gatekeepers.huggingface!;
+  assert.equal(hf.name, "acme-hf");
+  assert.deepEqual(hf.secrets, { required: [...GATEKEEPER_REQUIRED_SECRETS.huggingface!] });
+  assert.ok(generated.router.services!.some(
+    (service) => service.binding === "GATEKEEPER_HUGGINGFACE" && service.service === "acme-hf"));
+  assert.ok(generated.workshop.services!.some(
+    (service) => service.binding === "GATEKEEPER_HUGGINGFACE" &&
+      service.service === "acme-hf" && service.entrypoint === "GatekeeperVendor"));
+});
+
+test("disabled optional Gatekeepers create no Worker, binding, or secret requirement", async () => {
+  const generated = generateConfigs(validConfig, await baseConfigs());
+  assert.deepEqual(generated.gatekeepers, {});
+  const bindings = (config: GeneratedConfigs) =>
+    [...config.router.services!, ...config.workshop.services!].map((service) => service.binding);
+  for (const id of Object.keys(OPTIONAL_GATEKEEPER_CATALOG) as OptionalGatekeeperId[]) {
+    const binding = OPTIONAL_GATEKEEPER_CATALOG[id].binding;
+    assert.ok(!bindings(generated).includes(binding), `${binding} present while disabled`);
+  }
+  // And no build step runs for them.
+  const commands = buildCommands(validConfig).map(({ args }) => args.join(" "));
+  for (const pkg of ["gatekeeper-snowflake", "gatekeeper-huggingface"]) {
+    assert.ok(!commands.some((command) => command.includes(pkg)), `${pkg} built while disabled`);
+  }
+});
+
+test("rejects enabling a Gatekeeper the generator cannot wire", () => {
+  assert.throws(
+    () => validateConfig(variant((c) => {
+      c.gatekeepers.github = { enabled: true, workerName: "acme-github" };
+    })),
+    /cannot deploy it yet/i);
+});
+
+test("builds each enabled optional Gatekeeper from its own package", () => {
+  const config = variant((c) => {
+    c.gatekeepers.snowflake = { enabled: true, workerName: "acme-snowflake" };
+    c.gatekeepers.huggingface = { enabled: true, workerName: "acme-hf" };
+  });
+  assert.deepEqual(enabledWiredGatekeepers(config), ["snowflake", "huggingface"]);
+  const commands = buildCommands(config).map(({ args }) => args.join(" "));
+  assert.ok(commands.some((command) => command.includes("gatekeeper-snowflake") && command.includes("build")));
+  assert.ok(commands.some((command) => command.includes("gatekeeper-huggingface") && command.includes("build")));
+  // Only enabled packages are built: the deployment must not touch a disabled integration.
+  const disabledConfig = variant((c) => {
+    c.gatekeepers.snowflake = { enabled: true, workerName: "acme-snowflake" };
+  });
+  const disabledCommands = buildCommands(disabledConfig).map(({ args }) => args.join(" "));
+  assert.ok(!disabledCommands.some((command) => command.includes("gatekeeper-huggingface")));
 });

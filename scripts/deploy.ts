@@ -6,12 +6,13 @@ import { dirname, join, relative, resolve } from "node:path";
 import { parse, printParseErrorCode, type ParseError } from "jsonc-parser";
 import { pnpmCommand } from "../cloudflare-os/scripts/pnpm-command.ts";
 import { resolveBinEntry } from "../cloudflare-os/scripts/bin-entry.ts";
-import { AI_GATEWAY_PROVIDERS } from "./deployment-config.ts";
+import { AI_GATEWAY_PROVIDERS, GATEKEEPER_REQUIRED_SECRETS, WIRED_GATEKEEPERS } from "./deployment-config.ts";
 import type {
   BaseConfigs,
   BuildCommand,
   DeploymentConfig,
   GeneratedConfigs,
+  OptionalGatekeeperId,
   ProdWranglerConfig,
   RouterRoute,
 } from "./deployment-config.ts";
@@ -240,6 +241,15 @@ export function validateConfig(config: DeploymentConfig): DeploymentConfig {
   }
   if (!workerNames.every((name) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(name))) {
     throw new Error("Worker names must use lowercase letters, numbers, and hyphens.");
+  }
+  for (const [id, gatekeeper] of Object.entries(config.gatekeepers)) {
+    if (!gatekeeper.enabled) continue;
+    if (!WIRED_GATEKEEPERS.includes(id as OptionalGatekeeperId)) {
+      throw new Error(
+        `Gatekeeper ${id} is enabled, but this Starter cannot deploy it yet: its Worker config, ` +
+        `bindings, and secret contract are not wired into the deployment generator. Leave it ` +
+        `disabled until its wiring lands.`);
+    }
   }
 
   const route = config.workers.router.route;
@@ -575,8 +585,43 @@ export function generateConfigs(config: DeploymentConfig, bases: BaseConfigs): G
     setCommon(errorReporter, config, config.workers.errorReporter!.name);
   }
 
+  // Optional Gatekeepers: one Worker per *enabled* wired entry, bound into both the Workshop
+  // (vendor RPC over a service binding) and the Router (HTTP /gatekeeper/<name>; both sides
+  // discover GATEKEEPER_* bindings by scanning their env, so the binding name is the routing
+  // config). A disabled entry creates nothing: no Worker, no binding, no secret requirement, no
+  // route. Enabled entries not in WIRED_GATEKEEPERS were already rejected by validateConfig.
+  const gatekeepers: Partial<Record<OptionalGatekeeperId, ProdWranglerConfig>> = {};
+  for (const id of WIRED_GATEKEEPERS) {
+    const gatekeeper = config.gatekeepers[id];
+    if (!gatekeeper.enabled) continue;
+    // validateConfig enforces both guards below; repeated here so the generator itself fails loud
+    // if it is ever handed an unvalidated config.
+    if (!gatekeeper.workerName) {
+      throw new Error(`Gatekeeper ${id}.workerName is required when enabled.`);
+    }
+    const base = bases.gatekeepers[id];
+    if (!base) {
+      throw new Error(
+        `Gatekeeper ${id} is enabled but no base wrangler.jsonc was loaded for it. ` +
+        `This is a deploy.ts bug: the base must be read for every enabled wired Gatekeeper.`);
+    }
+    const generatedGatekeeper = structuredClone(base);
+    setCommon(generatedGatekeeper, config, gatekeeper.workerName);
+    const requiredSecrets = GATEKEEPER_REQUIRED_SECRETS[id];
+    if (requiredSecrets) {
+      generatedGatekeeper.secrets = { required: [...requiredSecrets] };
+    }
+    gatekeepers[id] = generatedGatekeeper;
+    router.services!.push({ binding: OPTIONAL_GATEKEEPER_CATALOG[id].binding, service: gatekeeper.workerName });
+    workshop.services!.push({
+      binding: OPTIONAL_GATEKEEPER_CATALOG[id].binding,
+      service: gatekeeper.workerName,
+      entrypoint: "GatekeeperVendor",
+    });
+  }
+
   return {
-    router, workshop, context, scheduler, customGatekeeper,
+    router, workshop, context, scheduler, customGatekeeper, gatekeepers,
     ...(errorReporter && { errorReporter }),
   };
 }
@@ -624,6 +669,11 @@ export function buildCommands(config: DeploymentConfig): BuildCommand[] {
     { args: submoduleBuild("@gadgets/gatekeeper-scheduler", "build:app") },
     { args: submoduleBuild("@gadgets/gatekeeper-scheduler") },
     { args: ownBuild("custom-gatekeeper") },
+    // Enabled optional Gatekeepers build alongside the other owned Workers. A disabled one is
+    // never built: it must not appear in the deployment at all.
+    ...enabledWiredGatekeepers(config).map((id) => ({
+      args: ownBuild(gatekeeperPackageName(id)),
+    })),
     ...(config.errorReporting.enabled ? [{ args: ownBuild("error-reporter") }] : []),
     // Access mode is a build-time constant in the frontend bundle (`src/useAuth.ts`), so it is set
     // here rather than inherited: a bundle built under a different value is wrong, not just stale.
@@ -631,6 +681,19 @@ export function buildCommands(config: DeploymentConfig): BuildCommand[] {
     { args: submoduleBuild("@gadgets/router") },
     { args: submoduleBuild("@gadgets/workshop-backend") },
   ];
+}
+
+/** The optional Gatekeepers this deployment enables, all guaranteed wired by `validateConfig`. */
+export function enabledWiredGatekeepers(config: DeploymentConfig): OptionalGatekeeperId[] {
+  return WIRED_GATEKEEPERS.filter((id) => config.gatekeepers[id]?.enabled);
+}
+
+/** The workspace package name of an optional Gatekeeper's directory, e.g. `gatekeeper-snowflake`. */
+function gatekeeperPackageName(id: OptionalGatekeeperId): string {
+  const dir = OPTIONAL_GATEKEEPER_CATALOG[id].packageDir;
+  const name = dir.split("/").pop()!;
+  if (!name) throw new Error(`Optional Gatekeeper ${id} has a malformed packageDir: ${dir}`);
+  return name;
 }
 
 // `allowTrailingComma` because wrangler accepts them and upstream uses them: the Scheduler's base
@@ -733,6 +796,16 @@ function reportAiGateway(config: DeploymentConfig): void {
 async function main(): Promise<void> {
   requireSubmodule();
   const config = await readDeployment(join(root, "deployment.jsonc"));
+  // Enabled optional Gatekeepers read their own base config from their package; disabled ones are
+  // never read, so a broken or half-implemented package cannot break a deployment that does not
+  // use it.
+  const enabledGatekeepers = enabledWiredGatekeepers(config);
+  const gatekeeperBases = Object.fromEntries(await Promise.all(
+    enabledGatekeepers.map(async (id) => [
+      id,
+      await readJsonc(join(root, OPTIONAL_GATEKEEPER_CATALOG[id].packageDir, "wrangler.jsonc")),
+    ]),
+  ));
   const generated = generateConfigs(config, {
     router: await readJsonc(join(root, packageDirs.router, "wrangler.jsonc")),
     workshop: await readJsonc(join(root, packageDirs.workshop, "wrangler.jsonc")),
@@ -740,13 +813,27 @@ async function main(): Promise<void> {
     scheduler: await readJsonc(join(root, packageDirs.scheduler, "wrangler.jsonc")),
     customGatekeeper: await readJsonc(join(root, packageDirs.customGatekeeper, "wrangler.jsonc")),
     errorReporter: await readJsonc(join(root, packageDirs.errorReporter, "wrangler.jsonc")),
+    gatekeepers: gatekeeperBases,
   });
   reportAiGateway(config);
 
+  // Every generated file, written before any deploy and removed after: the standard Workers plus
+  // one per enabled optional Gatekeeper, each inside its own package directory.
+  const outputPaths: Record<string, string> = { ...generatedPaths };
+  for (const id of enabledGatekeepers) {
+    outputPaths[id] = join(root, OPTIONAL_GATEKEEPER_CATALOG[id].packageDir, generatedName);
+  }
+
   try {
     for (const [name, generatedConfig] of Object.entries(generated)) {
+      if (name === "gatekeepers") {
+        for (const [id, gatekeeperConfig] of Object.entries(generated.gatekeepers)) {
+          await writeFile(outputPaths[id], JSON.stringify(gatekeeperConfig, null, 2) + "\n");
+        }
+        continue;
+      }
       await writeFile(
-        generatedPaths[name as keyof typeof generatedPaths],
+        outputPaths[name],
         JSON.stringify(generatedConfig, null, 2) + "\n");
     }
     const check = process.argv.includes("--check");
@@ -759,11 +846,14 @@ async function main(): Promise<void> {
     deployWorker(packageDirs.context, deployArgs);
     deployWorker(packageDirs.scheduler, deployArgs);
     deployWorker(packageDirs.customGatekeeper, deployArgs);
+    for (const id of enabledGatekeepers) {
+      deployWorker(OPTIONAL_GATEKEEPER_CATALOG[id].packageDir, deployArgs);
+    }
     deployWorker(packageDirs.workshop, deployArgs);
     // Last: it binds every one of the above.
     deployWorker(packageDirs.router, deployArgs);
   } finally {
-    await Promise.all(Object.values(generatedPaths).map((path) => rm(path, { force: true })));
+    await Promise.all(Object.values(outputPaths).map((path) => rm(path, { force: true })));
   }
 }
 

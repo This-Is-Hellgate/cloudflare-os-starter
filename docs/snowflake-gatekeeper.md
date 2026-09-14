@@ -2,9 +2,10 @@
 
 This document is the design boundary for the Snowflake Gatekeeper. The connector is implemented
 in this starter (`packages/gatekeeper-snowflake`) and listed in the optional-Gatekeeper catalog
-(`scripts/deployment-config.ts`), but the first milestone does not deploy it: enabling it in
-`deployment.jsonc` validates only — the deployment generator does not yet emit its Worker config,
-bindings, or secret wiring. Implementation must follow the outer repository's
+(`scripts/deployment-config.ts`). The deployment generator wires it when enabled: it emits the
+Worker config from the package's own `wrangler.jsonc`, adds both service bindings, and requires
+the `SNOWFLAKE_ACCOUNT` / `SNOWFLAKE_TOKEN` / `SNOWFLAKE_ROLE` secrets before wrangler will
+deploy. Implementation must follow the outer repository's
 [`write-gatekeeper` guidance](customization.md#custom-gatekeepers) and the
 reviewed `@gadgets/gatekeeper-kit` leaves.
 

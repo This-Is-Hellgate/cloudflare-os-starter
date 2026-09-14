@@ -102,6 +102,27 @@ export const AI_GATEWAY_PROVIDERS: readonly AiGatewayProvider[] =
   ["anthropic", "openai", "google", "cloudflare"];
 
 /**
+ * The optional Gatekeepers the deployment generator can already emit: the outer packages whose
+ * Worker config, bindings, and secret contract have passed their security review (see
+ * SECURITY-REVIEW.md in packages/gatekeeper-snowflake and packages/gatekeeper-huggingface). The
+ * remaining catalog entries are upstream packages whose wiring (OAuth flows, per-user connections)
+ * is a later change; enabling one in `deployment.jsonc` is rejected loudly rather than half-wired.
+ */
+export const WIRED_GATEKEEPERS: readonly OptionalGatekeeperId[] = ["snowflake", "huggingface"];
+
+/**
+ * Wrangler secrets each wired Gatekeeper requires before it will deploy. These make the generated
+ * `secrets.required` list; wrangler refuses the deploy until they are installed with
+ * `wrangler secret put`. Everything beyond these (allowlists, limits, operator gates) is optional
+ * and documented in the package's SECURITY-REVIEW.md; each Gatekeeper fails closed without its
+ * required secrets, so a half-configured Worker is inert rather than unsafe.
+ */
+export const GATEKEEPER_REQUIRED_SECRETS: Partial<Record<OptionalGatekeeperId, readonly string[]>> = {
+  snowflake: ["SNOWFLAKE_ACCOUNT", "SNOWFLAKE_TOKEN", "SNOWFLAKE_ROLE"],
+  huggingface: ["HF_TOKEN"],
+};
+
+/**
  * The public address of the router Worker. Exactly one field is set; `validateConfig` enforces
  * that, since wrangler would otherwise happily deploy both a custom domain and a workers.dev route.
  */
@@ -265,6 +286,8 @@ export interface GeneratedConfigs {
   context: ProdWranglerConfig;
   scheduler: ProdWranglerConfig;
   customGatekeeper: ProdWranglerConfig;
+  /** One generated config per *enabled* wired optional Gatekeeper; absent ids are disabled. */
+  gatekeepers: Partial<Record<OptionalGatekeeperId, ProdWranglerConfig>>;
   /** Absent when `errorReporting.enabled` is false. */
   errorReporter?: ProdWranglerConfig;
 }
@@ -277,6 +300,8 @@ export interface BaseConfigs {
   scheduler: ProdWranglerConfig;
   customGatekeeper: ProdWranglerConfig;
   errorReporter: ProdWranglerConfig;
+  /** Base `wrangler.jsonc` per enabled wired optional Gatekeeper, loaded from its package. */
+  gatekeepers: Partial<Record<OptionalGatekeeperId, ProdWranglerConfig>>;
 }
 
 /** One build step `deploy.ts` runs before deploying. See `buildCommands`. */

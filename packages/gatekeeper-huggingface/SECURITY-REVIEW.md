@@ -1,11 +1,12 @@
 # Hugging Face Gatekeeper — moderate API security review
 
 Status: Implemented in this starter (`packages/gatekeeper-huggingface`) and listed in the
-optional-Gatekeeper catalog (`scripts/deployment-config.ts`), but **not deployable**: the
-deployment generator does not emit its Worker config or bindings. Read surfaces are live:
-bounded dataset queries run through the approved `datasets-server.huggingface.co` backend
-(fixed dataset, config/split discovery, row/byte limits), and discussion listings return a
-real Cap'n Web `RpcTarget` cursor. Writes remain gated in code: `applyAction` executes an
+optional-Gatekeeper catalog (`scripts/deployment-config.ts`). The deployment generator wires it
+when enabled: it emits the Worker config from the package's own `wrangler.jsonc`, adds both
+service bindings, and requires the `HF_TOKEN` secret before wrangler will deploy. Read surfaces
+are live: bounded dataset queries run through the approved `datasets-server.huggingface.co`
+backend (fixed dataset, config/split discovery, row/byte limits), and discussion listings return
+a real Cap'n Web `RpcTarget` cursor. Writes remain gated in code: `applyAction` executes an
 approved action only when the operator sets `HF_ENABLE_WRITES=true|1`; without the gate it
 throws. OAuth/token setup and Workshop registration are intentionally not included
 until the operator approves this boundary.

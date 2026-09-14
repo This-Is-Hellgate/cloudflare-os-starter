@@ -141,4 +141,13 @@ describe("Snowflake API and capability surface", () => {
     expect(source).toContain("Only bounded SELECT statements are permitted.");
     expect(source).toContain("allowed(p.databases, options.database, \"Database\")");
   });
+
+  it("keeps types-code.ts hand-synced with types.d.ts", () => {
+    const declarations = readFileSync(new URL("../src/types.d.ts", import.meta.url), "utf8");
+    const code = readFileSync(new URL("../src/types-code.ts", import.meta.url), "utf8");
+    for (const marker of ["proposeWrite(operation: \"insert\" | \"update\" | \"merge\", target: string, sql: string): Promise<SnowflakeWriteProposal>", "getWriteProposal(proposalId: string): Promise<SnowflakeWriteProposal | null>", "runReadOnlySql(sql: string, options: ReadOnlySqlOptions): Promise<ReadOnlySqlResult>", "cortexAnalyst(request: CortexAnalystRequest): Promise<CortexAnalystResult>"]) {
+      expect(declarations).toContain(marker);
+      expect(code).toContain(marker);
+    }
+  });
 });
