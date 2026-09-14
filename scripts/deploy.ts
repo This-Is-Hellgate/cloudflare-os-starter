@@ -739,8 +739,35 @@ function runCommand(
 // Spawned through pnpmCommand rather than as a bare "pnpm": on Windows the pnpm on PATH is a `.cmd`
 // shim Node refuses to spawn without a shell, and `shell: true` would re-split argv and break any
 // checkout path containing a space.
+/**
+ * `[command, argv]` for spawning pnpm from this script, Windows-safe.
+ *
+ * Delegates to the submodule's `pnpmCommand`, then repairs the one case it cannot handle: a
+ * Windows standalone-pnpm install sets `npm_execpath` to `pnpm.exe`, which the submodule's
+ * JS-entry regex deliberately does not match, leaving a bare `"pnpm"` that `spawnSync` cannot
+ * execute (no extensionless executable on Windows). An `.exe` spawns directly, no shell needed.
+ * A non-`.exe` execpath (e.g. npm's `npm-cli.js`) is left as the loud ENOENT fallback — spawning a
+ * `.js` as an executable would be wrong, and the submodule's comment warns against substituting it.
+ *
+ * Lives here rather than in the submodule because `cloudflare-os/` is the reviewed upstream
+ * baseline; see scripts/boundary-check.ts.
+ */
+export function pnpmSpawnArgs(
+  args: string[],
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): [string, string[]] {
+  const [command, argv] = pnpmCommand(args, env, platform);
+  if (command !== "pnpm") return [command, argv];
+  const exec = env.npm_execpath;
+  if (platform === "win32" && exec && /\.exe$/i.test(exec) && existsSync(exec)) {
+    return [exec, argv];
+  }
+  return [command, argv];
+}
+
 function run(args: string[], cwd = root, env: NodeJS.ProcessEnv = process.env): void {
-  const [command, argv] = pnpmCommand(args, env);
+  const [command, argv] = pnpmSpawnArgs(args, env);
   runCommand(command, argv, cwd, env, `pnpm ${args.join(" ")}`);
 }
 

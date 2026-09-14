@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { parse, type ParseError } from "jsonc-parser";
-import { aiGatewayPlan, buildCommands, enabledWiredGatekeepers, generateConfigs, validateConfig } from "./deploy.ts";
+import { aiGatewayPlan, buildCommands, enabledWiredGatekeepers, generateConfigs, pnpmSpawnArgs, validateConfig } from "./deploy.ts";
 import {
   GATEKEEPER_REQUIRED_SECRETS,
   OPTIONAL_GATEKEEPER_CATALOG,
@@ -749,4 +749,34 @@ test("builds each enabled optional Gatekeeper from its own package", () => {
   });
   const disabledCommands = buildCommands(disabledConfig).map(({ args }) => args.join(" "));
   assert.ok(!disabledCommands.some((command) => command.includes("gatekeeper-huggingface")));
+});
+
+// ---------------------------------------------------------------------------
+// Windows-safe pnpm spawning
+
+test("spawns the standalone pnpm.exe directly when npm_execpath is a Windows binary", () => {
+  // node.exe is a real .exe on every platform, so existence is trustworthy in tests.
+  const env = { npm_execpath: process.execPath };
+  const [command, argv] = pnpmSpawnArgs(["test"], env, "win32");
+  assert.equal(command, process.execPath);
+  assert.deepEqual(argv, ["test"]);
+});
+
+test("keeps the loud fallback for a non-exe execpath and off Windows", () => {
+  // A .js execpath must not be spawned as an executable: the submodule deliberately leaves this
+  // as bare "pnpm" (ENOENT) rather than risk running npm against a pnpm workspace.
+  const jsEnv = { npm_execpath: "C:/npm/npm-cli.js" };
+  assert.deepEqual(pnpmSpawnArgs(["test"], jsEnv, "win32"), ["pnpm", ["test"]]);
+
+  // Missing execpath: same fallback.
+  assert.deepEqual(pnpmSpawnArgs(["test"], {}, "win32"), ["pnpm", ["test"]]);
+
+  // Off Windows the submodule's answer is used as-is, even with an .exe execpath.
+  const exeEnv = { npm_execpath: process.execPath };
+  assert.deepEqual(pnpmSpawnArgs(["test"], exeEnv, "linux"), ["pnpm", ["test"]]);
+});
+
+test("keeps the submodule's node-with-entry answer untouched", () => {
+  const env = { npm_execpath: "C:/pnpm/pnpm.cjs" };
+  assert.deepEqual(pnpmSpawnArgs(["test"], env, "win32"), [process.execPath, ["C:/pnpm/pnpm.cjs", "test"]]);
 });
