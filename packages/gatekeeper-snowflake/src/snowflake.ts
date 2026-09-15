@@ -1,7 +1,7 @@
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import type {
-  AccountDescription, ActionDescription, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback,
+  AccountDescription, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback,
   GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, ResourceDescription,
   SupportedResource, VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
@@ -15,12 +15,13 @@ import type {
   SnowflakeSession,
 } from "./types.js";
 import TYPES_CODE from "./types-code.js";
-import { Stage, GatedActions, proposeAction, type StageRecord } from "@gadgets/stage";
+import { Stage, GatedActions, ExecutionJournal, proposeAction, type StageRecord } from "@gadgets/stage";
+import type { ActionRef, ApprovalSubject } from "@gadgets/stage";
 import { LivePageSource } from "@gadgets/cursor";
-import { boundedSelect, partitionPager, type PartitionMeta, type ReadOnlySqlPage } from "./sql-pages.js";
+import { boundedSelect, partitionPager, type ReadOnlySqlPage } from "./sql-pages.js";
 import {
   allowed, boundedInt, boundedText, identifier, qualified, snowflakePolicy, validateWriteProposal,
-  writesEnabled, MAX_QUESTION, MAX_SQL,
+  writesEnabled, MAX_QUESTION,
 } from "./policy.js";
 
 const RESOURCE: SupportedResource = {
@@ -161,7 +162,15 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
 
 @validateRpc() export class SnowflakeGatekeeper extends DurableObject<Env, Props> implements Gatekeeper<SnowflakeSession> {
   readonly #stage = new Stage<SnowflakeWriteAction>({ kv: this.ctx.storage.kv, label: "Snowflake" });
-  readonly #gated = new GatedActions(this.#stage, "Snowflake");
+  readonly #journal = new ExecutionJournal({
+    kv: this.ctx.storage.kv,
+    // The DO's real exclusive-execution primitive: while a block runs, every other event queues.
+    runExclusive: this.ctx.blockConcurrencyWhile.bind(this.ctx),
+    gatekeeperId: "snowflake",
+    accountId: this.env.SNOWFLAKE_ACCOUNT,
+    label: "Snowflake",
+  });
+  readonly #gated = new GatedActions(this.#stage, "Snowflake", this.#journal);
 
   async describe(): Promise<ResourceDescription> { return { url: `snowflake://${this.ctx.props?.account ?? this.env.SNOWFLAKE_ACCOUNT}`, title: "Snowflake capability", snippet: "Bounded metadata, read-only SQL, Cortex Analyst/Search, and approval-gated data actions.", suggestedBindingName: "SNOWFLAKE", tsType: "SnowflakeSession" }; }
   async getTypeScriptTypes() { return TYPES_CODE; } async getAutoApprovableActions(): Promise<[]> { return []; }
@@ -169,27 +178,75 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
   async addObserver() { throw new Error("Snowflake bindings require observer ACL verification before sharing."); }
   async removeObserver() {}
 
-  async applyAction(actionId: number): Promise<void> {
-    await this.#gated.apply(actionId, {
-      writesEnabled: writesEnabled(this.env),
-      disabledMessage: "Snowflake action executor is not enabled.",
-      execute: (record) => this.#execute(record),
+  /**
+   * The trusted approval subject for an action, rebuilt from this DO's environment and policy —
+   * never from session-visible arguments. Expiry is bound at proposal time (subject passed to
+   * stageAction) and rechecked at execution.
+   */
+  async #trustedSubject(operation: string, resource: string, expiresAt: number): Promise<ApprovalSubject> {
+    const policy = snowflakePolicy(this.env);
+    const policyVersion = await (await import("@gadgets/stage")).hashPayload({
+      databases: [...policy.databases].sort(), schemas: [...policy.schemas].sort(), tables: [...policy.tables].sort(),
+      role: this.env.SNOWFLAKE_ROLE, warehouse: this.env.SNOWFLAKE_WAREHOUSE ?? null,
     });
+    return {
+      ownerId: this.env.SNOWFLAKE_USER ?? "operator",
+      accountId: this.env.SNOWFLAKE_ACCOUNT,
+      workspaceId: "default",
+      operation,
+      resource,
+      payloadHash: "",
+      policyVersion,
+      expiresAt,
+    };
   }
 
-  // The executor runs only behind an explicit operator gate (SNOWFLAKE_ENABLE_WRITES) and after a
-  // human approval; the durable Stage record is the completion evidence. The stored payload is
-  // re-validated against the same policy as a fresh proposal before any remote call.
-  async #execute(record: StoredSnowflakeAction): Promise<void> {
+  async applyAction(actionId: number): Promise<void> {
+    // Decision + execution are separate. The record's bound subject carries the proposal-time
+    // scope; the gate rechecks this DO's current trusted context and expiry before vendor I/O.
+    const record = await this.#stage.require(actionId);
+    const bound = record.subject;
+    const subject = await this.#trustedSubject(record.operation, record.target, bound?.expiresAt ?? 0);
+    const ref: ActionRef = this.#journal.ref(actionId);
+    const outcome = await this.#gated.apply(actionId, {
+      writesEnabled: writesEnabled(this.env),
+      disabledMessage: "Snowflake action executor is not enabled.",
+      subject,
+      ref,
+      execute: (stored, attempt) => this.#execute(stored, attempt),
+      // Reconciliation probe: absence of an external effect is established by a vendor read-back,
+      // never assumed. The statement's request id is the key the vendor reconciles by.
+      probe: async () => "unknown",
+    });
+    // An indeterminate outcome is surfaced to the overseer: the user sees the action failed and
+    // can reconcile. Success (including idempotent redelivery) completes the callback.
+    if (outcome.status === "indeterminate") {
+      throw new Error(`Snowflake action ${actionId} is indeterminate: a vendor effect may exist; reconcile by request id ${outcome.attempt.idempotencyKey}.`);
+    }
+    if (outcome.status === "failed") {
+      throw new Error(`Snowflake action ${actionId} failed: ${outcome.attempt.errorCode ?? "unknown error"}.`);
+    }
+  }
+
+  // The executor runs only behind an explicit operator gate (SNOWFLAKE_ENABLE_WRITES), the
+  // trusted overseer decision, and the execution journal's atomic attempt claim. The stored
+  // payload is re-validated against the same policy as a fresh proposal before any remote call.
+  async #execute(record: StoredSnowflakeAction, _attempt: import("@gadgets/stage").ExecutionAttempt): Promise<import("@gadgets/stage").ReceiptInput> {
     const policy = snowflakePolicy(this.env);
     const { database, schema } = validateWriteProposal(policy, record.operation, record.target, record.sql);
-    await new SnowflakeApi(this.env).request({
+    const result = await new SnowflakeApi(this.env).request({
       statement: record.sql,
       timeout: 30,
       database,
       schema,
       ...(this.env.SNOWFLAKE_WAREHOUSE ? { warehouse: this.env.SNOWFLAKE_WAREHOUSE } : {}),
     });
+    // The vendor's real statement/request identifier when the response carries one; the request
+    // id itself is the reconciliation key either way.
+    return {
+      vendorId: (result as { queryId?: string }).queryId ?? null,
+      version: (result as { statementHandle?: string }).statementHandle ?? null,
+    };
   }
 
   async rejectAction(actionId: number): Promise<void> {
@@ -202,7 +259,10 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
   async revertAction() { throw new Error("Snowflake actions are not reversible automatically."); }
 
   async stageAction(action: SnowflakeWriteAction): Promise<number> {
-    return this.#stage.stage(action);
+    // The trusted subject is bound inside the owning DO, from its environment and policy — the
+    // session passes only the payload. Expiry is bound here, at proposal time.
+    const subject = await this.#trustedSubject(action.operation, action.target, Date.now() + 7 * 24 * 60 * 60 * 1000);
+    return this.#stage.stage(action, subject);
   }
 
   async markActionPending(actionId: number): Promise<void> {
@@ -331,7 +391,7 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
     const raw = Array.isArray(data.results) ? data.results : [];
     const results: SearchResult[] = raw.slice(0, 100).map((row: Record<string, unknown>) => {
       const strings = Object.values(row ?? {}).filter((v): v is string => typeof v === "string");
-      const snippet = strings.sort((a, b) => b.length - a.length)[0] ?? JSON.stringify(row ?? {});
+      const snippet = strings.toSorted((a, b) => b.length - a.length)[0] ?? JSON.stringify(row ?? {});
       return { title: service, snippet: snippet.slice(0, 2_000) };
     });
     return { results, truncated: raw.length > results.length };
@@ -343,6 +403,7 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
     const p = this.policy();
     const table = validateWriteProposal(p, operation, target, sql).table;
     const payload: SnowflakeWriteAction = { proposalId: crypto.randomUUID(), operation, target: table, sql };
+    // The DO binds the trusted subject (owner/account/policy/expiry) at staging time.
     const { actionId } = await proposeAction(this.gatekeeper, this.queue, payload, {
       title: `Snowflake ${operation.toUpperCase()} on ${table}`,
       description: [

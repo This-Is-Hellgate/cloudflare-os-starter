@@ -3,7 +3,8 @@ import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import type { AccountDescription, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, ResourceConfiguratorFrame, ResourceDescription, SupportedResource, VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import type { CommitFileChange, DatasetPage, DatasetQueryOptions, DatasetQueryPages, DatasetQueryResult, DiscussionSummary, HuggingFaceCursor, HuggingFaceDatasetInfo, HuggingFaceDiscussionDetail, HuggingFaceFilePage, HuggingFaceModelCard, HuggingFaceRepository, HuggingFaceSession, HuggingFaceSpaceInfo, InferenceRequest, InferenceResult, InferenceTarget, WriteProposal } from "./types.js";
 import TYPES_CODE from "./types-code.js";
-import { Stage, GatedActions, proposeAction, type StageRecord } from "@gadgets/stage";
+import { Stage, GatedActions, ExecutionJournal, proposeAction, type StageRecord } from "@gadgets/stage";
+import type { ActionRef, ApprovalSubject, ExecutionAttempt, ReceiptInput } from "@gadgets/stage";
 import { LivePageSource, offsetPaged, type LivePage } from "@gadgets/cursor";
 
 const ICON = { url: "https://huggingface.co/front/assets/huggingface_logo-noborder.svg" };
@@ -101,7 +102,16 @@ class DatasetPagesCursor extends RpcTarget implements DatasetQueryPages {
 @validateRpc()
 export class HuggingFaceGatekeeper extends DurableObject<Env, GatekeeperProps> implements Gatekeeper<HuggingFaceSession> {
   readonly #stage = new Stage<HuggingFaceWriteAction>({ kv: this.ctx.storage.kv, label: "Hugging Face" });
-  readonly #gated = new GatedActions(this.#stage, "Hugging Face");
+  readonly #journal = new ExecutionJournal({
+    kv: this.ctx.storage.kv,
+    // The DO's real exclusive-execution primitive: while a block runs, every other event queues.
+    runExclusive: this.ctx.blockConcurrencyWhile.bind(this.ctx),
+    gatekeeperId: "huggingface",
+    // Lazy: defers the env read (which throws when unset) until first journal use.
+    accountId: () => parseResource(this.#url()).id,
+    label: "Hugging Face",
+  });
+  readonly #gated = new GatedActions(this.#stage, "Hugging Face", this.#journal);
 
   #url(): string | undefined { return this.ctx.props?.resourceUrl ?? this.env.HF_RESOURCE_URL; }
   async describe(): Promise<ResourceDescription> { const r = parseResource(this.#url()); return { url: `https://huggingface.co/${r.kind === "model" ? "models" : r.kind === "dataset" ? "datasets" : "spaces"}/${r.id}`, title: `Hugging Face ${r.kind}`, snippet: `Scoped ${r.kind} repository capability`, suggestedBindingName: `HUGGINGFACE_${r.kind.toUpperCase()}`, tsType: "HuggingFaceSession" }; }
@@ -111,17 +121,56 @@ export class HuggingFaceGatekeeper extends DurableObject<Env, GatekeeperProps> i
   async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> { throw new Error("Hugging Face bindings require tracked observer verification before sharing."); }
   async removeObserver(_id: string): Promise<void> {}
 
-  async applyAction(actionId: number): Promise<void> {
-    await this.#gated.apply(actionId, {
-      writesEnabled: writesEnabled(this.env),
-      disabledMessage: "Hugging Face write application is disabled until the action executor is enabled.",
-      execute: (record) => this.#execute(record),
-    });
+  /**
+   * The trusted approval subject for an action, rebuilt from this DO's environment and bound
+   * resource scope — never from session-visible arguments. Expiry is bound at proposal time.
+   */
+  async #trustedSubject(operation: string, resource: string, expiresAt: number): Promise<ApprovalSubject> {
+    const r = parseResource(this.#url());
+    const policyVersion = await (await import("@gadgets/stage")).hashPayload({ kind: r.kind, id: r.id, writes: writesEnabled(this.env) });
+    return {
+      ownerId: "operator",
+      accountId: r.id,
+      workspaceId: "default",
+      operation,
+      resource,
+      payloadHash: "",
+      policyVersion,
+      expiresAt,
+    };
   }
 
-  // The executor runs only behind an explicit operator gate (HF_ENABLE_WRITES) and after a human
-  // approval; the durable Stage record is the completion evidence.
-  async #execute(record: StoredHuggingFaceAction): Promise<void> {
+  async applyAction(actionId: number): Promise<void> {
+    // Decision + execution are separate. The record's bound subject carries the proposal-time
+    // scope; the gate rechecks this DO's current trusted context and expiry before vendor I/O.
+    const record = await this.#stage.require(actionId);
+    const bound = record.subject;
+    const subject = await this.#trustedSubject(record.operation, parseResource(this.#url()).id, bound?.expiresAt ?? 0);
+    const ref: ActionRef = this.#journal.ref(actionId);
+    const outcome = await this.#gated.apply(actionId, {
+      writesEnabled: writesEnabled(this.env),
+      disabledMessage: "Hugging Face write application is disabled until the action executor is enabled.",
+      subject,
+      ref,
+      execute: (stored, attempt) => this.#execute(stored, attempt),
+      // The Hub has no idempotency key: an uncertain commit is settled only by a read-back of
+      // the expected tree/commit metadata. Until P1.2 implements that protocol, "unknown" keeps
+      // the attempt indeterminate rather than retrying a write that may exist.
+      probe: async () => "unknown",
+    });
+    if (outcome.status === "indeterminate") {
+      throw new Error(`Hugging Face action ${actionId} is indeterminate: a vendor effect may exist; reconcile by key ${outcome.attempt.idempotencyKey}.`);
+    }
+    if (outcome.status === "failed") {
+      throw new Error(`Hugging Face action ${actionId} failed: ${outcome.attempt.errorCode ?? "unknown error"}.`);
+    }
+  }
+
+  // The executor runs only behind an explicit operator gate (HF_ENABLE_WRITES) and after the
+  // overseer's trusted decision; the journal's attempt claim and receipt are the durable
+  // completion evidence. Each branch reports the vendor's REAL identifiers when the response
+  // carries them, and honest nulls when it does not.
+  async #execute(record: StoredHuggingFaceAction, _attempt: ExecutionAttempt): Promise<ReceiptInput> {
     const client = new HubClient(this.env.HF_TOKEN);
     const r = parseResource(this.#url());
     switch (record.operation) {
@@ -136,26 +185,28 @@ export class HuggingFaceGatekeeper extends DurableObject<Env, GatekeeperProps> i
             : { path: c.path, operation: c.operation === "add" ? "add" : "update", content: c.content ?? "" }),
         };
         await client.request(apiPath(r, `/commit/${encodeURIComponent(revision ?? "main")}`), { method: "POST", body: JSON.stringify(payload) });
-        return;
+        // The Hub's legacy commit response carries no commit OID; P1.2's protocol work binds the
+        // returned OID contract. Until then the receipt is honest: vendorId null.
+        return { vendorId: null, version: null, evidenceIds: [`revision:${revision ?? "main"}`] };
       }
       case "create_discussion": {
         const { title, body, pullRequest } = record.data as { title: string; body: string; pullRequest?: boolean };
         const d = await client.request(apiPath(r, "/discussions"), { method: "POST", body: JSON.stringify({ title, description: body, pull_request: Boolean(pullRequest) }) });
         if (!d || (d as any).num === undefined) throw new Error("Hugging Face discussion creation could not be verified.");
-        return;
+        return { vendorId: String((d as any).num), version: null, evidenceIds: [] };
       }
       case "comment_discussion": {
         const { number, body } = record.data as { number: number; body: string };
         if (!Number.isInteger(number) || number < 1) throw new Error("Stored comment payload is invalid.");
         const d = await client.request(apiPath(r, `/discussions/${number}/comment`), { method: "POST", body: JSON.stringify({ comment: body }) });
         if (!d) throw new Error("Hugging Face discussion comment could not be verified.");
-        return;
+        return { vendorId: null, version: null, evidenceIds: [`discussion:${number}`] };
       }
       case "pause_space":
       case "resume_space": {
         if (r.kind !== "space") throw new Error("Stored Space payload does not match the bound resource.");
         await client.request(apiPath(r, record.operation === "pause_space" ? "/pause" : "/restart"), { method: "POST" });
-        return;
+        return { vendorId: null, version: null, evidenceIds: [] };
       }
       default:
         throw new Error(`Hugging Face action executor does not support operation ${record.operation}.`);
@@ -186,8 +237,10 @@ export class HuggingFaceGatekeeper extends DurableObject<Env, GatekeeperProps> i
   async findActionByProposalId(proposalId: string): Promise<WriteProposal | null> {
     const record = await this.#stage.findByProposalId(proposalId);
     if (!record) return null;
-    // Honest state: once the executor has applied the change it is no longer simulated.
-    return { proposalId, actionId: record.actionId, operation: record.operation, summary: record.summary, simulated: record.state !== "approved" };
+    // Honest state: "simulated" until the execution journal holds a settled success — a recorded
+    // approval decision alone does not mean the Hub change exists.
+    const settled = await this.#journal.status(record.actionId);
+    return { proposalId, actionId: record.actionId, operation: record.operation, summary: record.summary, simulated: settled !== "succeeded" };
   }
 }
 

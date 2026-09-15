@@ -30,11 +30,16 @@ export interface StageKv {
   list<T = unknown>(options?: { prefix?: string }): Iterable<[string, T]>;
 }
 
-export type StageActionState = "staged" | "pending" | "approved" | "rejected";
+export type StageActionState = "staged" | "pending" | "approved" | "rejected" | "expired";
 
 /**
  * The durable record for a staged action: the vendor's own payload `P` (which must carry the
  * `proposalId` that sessions and overseers use to correlate) plus the ledger fields Stage owns.
+ *
+ * `subject` binds the record to the trusted approval scope (owner/account/workspace/policy)
+ * captured at proposal time from session context — never from model arguments. `payloadHash` is
+ * the digest of the normalized payload; execution rechecks it. Open records without a subject
+ * carry `requiresResubmission` after legacy migration and cannot be executed.
  */
 export type StageRecord<P> = P & {
   actionId: number;
@@ -42,6 +47,32 @@ export type StageRecord<P> = P & {
   submittedAt: number;
   appliedAt?: number;
   rejectedAt?: number;
+  expiredAt?: number;
+  decidedAt?: number;
+  requiresResubmission?: boolean;
+  quarantined?: boolean;
+  payloadHash?: string;
+  subject?: import("./contracts.js").ApprovalSubject;
+};
+
+/**
+ * The one-way decision transitions. Terminal decisions (approved, rejected, expired) cannot be
+ * revived: the table is enforced by `decide()` and covered by the terminal-transition regression.
+ *
+ *   staged   -> pending        submission to the approval queue
+ *   staged   -> rejected       rejected before submission completes
+ *   staged   -> expired        expiry before submission completes
+ *   pending  -> approved       the trusted overseer decision (recorded by apply, see gated.ts)
+ *   pending  -> rejected       the trusted overseer decision
+ *   pending  -> expired        expiry sweep
+ *   approved | rejected | expired -> (terminal)
+ */
+const DECISION_TRANSITIONS: Record<StageActionState, StageActionState[]> = {
+  staged: ["pending", "rejected", "expired"],
+  pending: ["approved", "rejected", "expired"],
+  approved: [],
+  rejected: [],
+  expired: [],
 };
 
 /** The vendor payload: everything except the ledger fields Stage itself assigns. */
@@ -78,9 +109,19 @@ export class Stage<P extends { proposalId: string }> {
   }
 
   /** Creates the durable record in the explicit "staged" state and returns its action id. */
-  async stage(payload: StagePayload<P>): Promise<number> {
+  async stage(payload: StagePayload<P>, subject?: import("./contracts.js").ApprovalSubject): Promise<number> {
     const id = await this.#nextActionId();
-    const record = { ...payload, actionId: id, state: "staged", submittedAt: Date.now() } as StageRecord<P>;
+    // The payload hash binds exactly the payload as passed (StagePayload<P> already excludes the
+    // ledger fields Stage assigns below).
+    const payloadHash = await (await import("./contracts.js")).hashPayload(payload);
+    const record = {
+      ...payload,
+      actionId: id,
+      state: "staged",
+      submittedAt: Date.now(),
+      payloadHash,
+      ...(subject ? { subject: { ...subject, payloadHash } } : {}),
+    } as StageRecord<P>;
     await this.#kv.put(`${LIVE_PREFIX}${id}`, record);
     return id;
   }
@@ -89,7 +130,30 @@ export class Stage<P extends { proposalId: string }> {
   async markPending(actionId: number): Promise<void> {
     const record = await this.require(actionId);
     record.state = "pending";
+    record.decidedAt = Date.now();
     await this.#kv.put(`${LIVE_PREFIX}${actionId}`, record);
+  }
+
+  /** Enforces the one-way decision transition table. Terminal decisions cannot be revived. */
+  async decide(actionId: number, next: StageActionState): Promise<StageRecord<P>> {
+    const record = await this.require(actionId);
+    if (!DECISION_TRANSITIONS[record.state].includes(next)) {
+      throw new Error(`${this.#label} action ${actionId} cannot move from ${record.state} to ${next}.`);
+    }
+    record.state = next;
+    record.decidedAt = Date.now();
+    const key = `${LIVE_PREFIX}${actionId}`;
+    const terminal = next === "approved" || next === "rejected" || next === "expired";
+    if (next === "approved") record.appliedAt = record.appliedAt ?? Date.now();
+    if (next === "rejected") record.rejectedAt = Date.now();
+    if (next === "expired") record.expiredAt = Date.now();
+    if (terminal) {
+      await this.#kv.delete(key);
+      await this.#kv.put(`${RETIRED_PREFIX}${actionId}`, record);
+    } else {
+      await this.#kv.put(key, record);
+    }
+    return record;
   }
 
   /**
@@ -103,27 +167,24 @@ export class Stage<P extends { proposalId: string }> {
 
   /**
    * Marks a pending or staged action rejected and retires it. The record is the durable evidence
-   * that the proposal was rejected, so it is moved aside rather than deleted.
+   * that the proposal was rejected, so it is moved aside rather than deleted. Goes through the
+   * one-way decision table: a terminal record (already approved, rejected, expired) refuses.
    */
   async reject(actionId: number): Promise<StageRecord<P>> {
     const record = await this.require(actionId);
-    if (record.state !== "pending" && record.state !== "staged") {
+    if (record.state === "approved" || record.state === "rejected" || record.state === "expired") {
       throw new Error(`${this.#label} action ${actionId} is no longer pending.`);
     }
-    record.state = "rejected";
-    record.rejectedAt = Date.now();
-    await this.#kv.delete(`${LIVE_PREFIX}${actionId}`);
-    await this.#kv.put(`${RETIRED_PREFIX}${actionId}`, record);
-    return record;
+    return this.decide(actionId, "rejected");
   }
 
-  /** Marks an action approved (the executor's durable completion record). */
+  /**
+   * Records the trusted approval decision (made through the owning upstream approval capability)
+   * and retires the record as terminal. Decision, not execution: whether the vendor I/O succeeded
+   * is the execution journal's business (see execution.ts).
+   */
   async markApproved(actionId: number): Promise<StageRecord<P>> {
-    const record = await this.require(actionId);
-    record.state = "approved";
-    record.appliedAt = Date.now();
-    await this.#kv.put(`${LIVE_PREFIX}${actionId}`, record);
-    return record;
+    return this.decide(actionId, "approved");
   }
 
   /** Looks up a record across live and retired storage. */
@@ -144,17 +205,20 @@ export class Stage<P extends { proposalId: string }> {
    * proposal id were ever reused, the current record is the one that matters.
    */
   async findByProposalId(proposalId: string): Promise<StageRecord<P> | null> {
-    for (const record of await this.#listAll()) {
+    for (const record of await this.listAll()) {
       if (record?.proposalId === proposalId) return record;
     }
     return null;
   }
 
-  async #listAll(): Promise<StageRecord<P>[]> {
+  /** Every record, live before retired, in ascending action-id order within each group. */
+  async listAll(): Promise<StageRecord<P>[]> {
     const live: StageRecord<P>[] = [];
     for (const [, record] of await this.#kv.list<StageRecord<P>>({ prefix: LIVE_PREFIX })) live.push(record);
     const retired: StageRecord<P>[] = [];
     for (const [, record] of await this.#kv.list<StageRecord<P>>({ prefix: RETIRED_PREFIX })) retired.push(record);
+    live.sort((a, b) => a.actionId - b.actionId);
+    retired.sort((a, b) => a.actionId - b.actionId);
     return [...live, ...retired];
   }
 }
