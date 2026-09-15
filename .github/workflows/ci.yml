@@ -1,0 +1,51 @@
+# Release checks for the Cloudflare OS Starter.
+#
+# Runs on Windows and Linux (the two supported environments). CI has no vendor credentials and
+# performs no remote deployment: `--dry-run` verifies bundling and configuration, not live
+# permissions. The deployment check reads the non-secret fixture `scripts/deployment.ci.jsonc`
+# rather than any developer's `deployment.jsonc`.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.17.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: Install outer workspace (frozen)
+        run: pnpm install --frozen-lockfile
+
+      - name: Install submodule workspace (frozen)
+        run: pnpm install --frozen-lockfile
+        working-directory: cloudflare-os
+
+      - name: Test
+        run: pnpm test
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Boundary check
+        run: pnpm check:boundary
+
+      - name: Deployment dry run (non-secret CI fixture)
+        run: node scripts/deploy.ts --check --config scripts/deployment.ci.jsonc

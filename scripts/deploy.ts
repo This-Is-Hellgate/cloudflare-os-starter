@@ -1,8 +1,8 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { parse, printParseErrorCode, type ParseError } from "jsonc-parser";
 import { pnpmCommand } from "../cloudflare-os/scripts/pnpm-command.ts";
 import { resolveBinEntry } from "../cloudflare-os/scripts/bin-entry.ts";
@@ -793,6 +793,47 @@ function requireSubmodule(): void {
   }
 }
 
+const defaultConfigPath = "deployment.jsonc";
+
+/**
+ * The deployment configuration file this invocation reads.
+ *
+ * `--config <path>` overrides the repository default (`deployment.jsonc`) so CI and other
+ * non-interactive callers can point at a non-secret fixture instead of depending on whatever
+ * settings a checkout happens to carry. The choice is validated explicitly -- exactly one path
+ * argument, inside this repository, an existing file -- because a silently-wrong config file is a
+ * deployment to the wrong place, not an error.
+ */
+export function resolveConfigPath(
+  argv: string[],
+  repoRoot: string = root,
+): string {
+  const flagIndex = argv.indexOf("--config");
+  if (flagIndex === -1) return join(repoRoot, defaultConfigPath);
+  const value = argv[flagIndex + 1];
+  if (value === undefined || value.startsWith("-")) {
+    throw new Error("--config requires a file path argument (e.g. --config scripts/deployment.ci.jsonc).");
+  }
+  if (argv.indexOf("--config", flagIndex + 1) !== -1) {
+    throw new Error("--config was given more than once.");
+  }
+  const path = resolve(repoRoot, value);
+  const relativePath = relative(repoRoot, path);
+  if (relativePath.startsWith("..") || isAbsolute(relativePath)) {
+    throw new Error(`--config path must be inside this repository: ${value}`);
+  }
+  let stats: import("node:fs").Stats;
+  try {
+    stats = statSync(path);
+  } catch {
+    throw new Error(`--config file not found: ${relativePath || path}`);
+  }
+  if (!stats.isFile()) {
+    throw new Error(`--config must name a file, not a directory: ${relativePath || path}`);
+  }
+  return path;
+}
+
 function build(config: DeploymentConfig): void {
   for (const { args, env } of buildCommands(config)) {
     run(args, root, env ? { ...process.env, ...env } : process.env);
@@ -822,7 +863,8 @@ function reportAiGateway(config: DeploymentConfig): void {
 
 async function main(): Promise<void> {
   requireSubmodule();
-  const config = await readDeployment(join(root, "deployment.jsonc"));
+  const configPath = resolveConfigPath(process.argv);
+  const config = await readDeployment(configPath);
   // Enabled optional Gatekeepers read their own base config from their package; disabled ones are
   // never read, so a broken or half-implemented package cannot break a deployment that does not
   // use it.

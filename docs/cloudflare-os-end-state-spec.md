@@ -81,6 +81,44 @@ tables/storage and Snowflake are separate destinations selected by an explicit a
 must declare source, destination, schema/mapping, retention, and approval; credentials and raw
 private payloads are never copied into logs or model context unless explicitly needed and bounded.
 
+## Milestones: complete Code Mode and the governed operating loop
+
+"Full function" is delivered in two milestones. Basic Code Mode readiness is not the complete
+operating environment.
+
+- **M1 — Complete enterprise Code Mode.** Connected, discoverable, bounded Snowflake, Hugging
+  Face, NVIDIA, GitHub, Confluence, Cloudflare telemetry, and configured MCP resources can
+  participate in a single generated program. Supported writes use verified approval/execution
+  lifecycles with durable receipts.
+- **M2 — Complete governed operating loop.** A durable task can resume, delegate, propose
+  infrastructure/model-route changes, create a bounded adapter, observe outcomes, and evaluate or
+  propose compensation.
+
+"Full" means the documented capability surface works end to end. It does not mean exposing every
+vendor endpoint. Disallowed capabilities remain disallowed even after M2.
+
+### Explicit storage/infrastructure exception
+
+The prohibitions above ("no bucket/object-storage access", "no unapproved destructive
+operations") are about *general agent access to account storage*. Two narrowly scoped additions
+are approved at M2 and are not violations of that rule:
+
+1. **Explicitly approved, namespaced infrastructure creation.** Approved proposals may create
+   namespaced Queue/D1/KV/R2 resources and Worker versions/deployments within operator-approved
+   namespaces, executed only from a private approval callback with versioned receipts and
+   compensation limits. This does not grant agents general read/write access to the *contents* of
+   account storage, nor administration, DNS, Access policy, billing, token, or user management.
+2. **An internal evidence store.** The task runtime owns a private evidence store (bounded R2
+   plus SQLite metadata) holding task evidence, checkpoints, and receipts. It is private to the
+   runtime and exposed only through scoped task evidence APIs.
+
+All other exclusions stand: no tenant-wide administration, billing, token creation, user
+management, arbitrary shell access, or self-modification of enforcement policy. NVIDIA remains
+remote inference/embeddings against operator-configured endpoints; training, model-weight
+transfer, GPU provisioning, and batch jobs stay outside this release. Provider-specific
+permissions and account entitlements remain prerequisites for activation. Missing credentials
+mean "unavailable"; they are never replaced with fabricated outputs.
+
 ## Definition of done
 
 The instance is ready only when the repository boundary check, type checks, focused Gatekeeper

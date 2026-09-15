@@ -73,6 +73,14 @@ pnpm exec wrangler login
 
 Your account needs [Workers](https://developers.cloudflare.com/workers/), [KV](https://developers.cloudflare.com/kv/), [R2](https://developers.cloudflare.com/r2/), [Browser Rendering](https://developers.cloudflare.com/browser-rendering/), and [Dynamic Worker Loaders](https://developers.cloudflare.com/workers/runtime-apis/bindings/worker-loader/). It also needs [Workers AI](https://developers.cloudflare.com/workers-ai/) and [AI Gateway](https://developers.cloudflare.com/ai-gateway/), which the default model catalog runs on; only turning that catalog off makes them dispensable. [Artifacts](https://developers.cloudflare.com/artifacts/) is optional.
 
+Supported development and CI environments are **Windows and Linux** (`.github/workflows/ci.yml` runs both). The deploy scripts are TypeScript run directly by `node`.
+
+`node scripts/deploy.ts` (and `pnpm check`) read `deployment.jsonc` by default; pass `--config <path>` to validate and dry-run a different configuration file that lives inside this repository — for example the non-secret CI fixture:
+
+```sh
+node scripts/deploy.ts --check --config scripts/deployment.ci.jsonc
+```
+
 ### 2. Configure sign-in
 
 Cloudflare OS supports several sign-in methods. This starter deploys [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/) mode, which verifies identity before a request reaches the Worker. See [Sign-in methods](docs/customization.md#sign-in-methods) for the alternatives and what switching involves.

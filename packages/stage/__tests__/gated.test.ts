@@ -21,7 +21,7 @@ function fakeKv(): StageKv {
       for (const [k, v] of map) {
         if (!options?.prefix || k.startsWith(options.prefix)) entries.push([k, v as T]);
       }
-      return entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))[Symbol.iterator]();
+      return entries.toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))[Symbol.iterator]();
     },
   };
 }

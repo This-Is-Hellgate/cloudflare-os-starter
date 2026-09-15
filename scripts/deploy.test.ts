@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { parse, type ParseError } from "jsonc-parser";
-import { aiGatewayPlan, buildCommands, enabledWiredGatekeepers, generateConfigs, pnpmSpawnArgs, validateConfig } from "./deploy.ts";
+import { aiGatewayPlan, buildCommands, enabledWiredGatekeepers, generateConfigs, pnpmSpawnArgs, resolveConfigPath, validateConfig } from "./deploy.ts";
 import {
   GATEKEEPER_REQUIRED_SECRETS,
   OPTIONAL_GATEKEEPER_CATALOG,
@@ -779,4 +780,49 @@ test("keeps the loud fallback for a non-exe execpath and off Windows", () => {
 test("keeps the submodule's node-with-entry answer untouched", () => {
   const env = { npm_execpath: "C:/pnpm/pnpm.cjs" };
   assert.deepEqual(pnpmSpawnArgs(["test"], env, "win32"), [process.execPath, ["C:/pnpm/pnpm.cjs", "test"]]);
+});
+
+// ---------------------------------------------------------------------------
+// --config path resolution (non-secret CI fixture support)
+
+const repoRoot = resolve(import.meta.dirname, "..");
+
+test("defaults to the repository's deployment.jsonc", () => {
+  assert.equal(resolveConfigPath([], repoRoot), join(repoRoot, "deployment.jsonc"));
+  assert.equal(
+    resolveConfigPath(["--check"], repoRoot),
+    join(repoRoot, "deployment.jsonc"),
+  );
+});
+
+test("resolves an explicit --config inside the repository", () => {
+  const path = resolveConfigPath(["--check", "--config", "scripts/deployment.ci.jsonc"], repoRoot);
+  assert.equal(path, join(repoRoot, "scripts", "deployment.ci.jsonc"));
+});
+
+test("rejects --config choices that could silently deploy the wrong settings", () => {
+  // Missing argument.
+  assert.throws(() => resolveConfigPath(["--config"], repoRoot), /requires a file path/);
+  // Another flag instead of a path.
+  assert.throws(() => resolveConfigPath(["--config", "--check"], repoRoot), /requires a file path/);
+  // Given twice.
+  assert.throws(
+    () => resolveConfigPath(["--config", "a.jsonc", "--config", "b.jsonc"], repoRoot),
+    /more than once/,
+  );
+  // Outside the repository.
+  assert.throws(
+    () => resolveConfigPath(["--config", "../secrets.jsonc"], repoRoot),
+    /inside this repository/,
+  );
+  // Nonexistent file.
+  assert.throws(
+    () => resolveConfigPath(["--config", "scripts/no-such-config.jsonc"], repoRoot),
+    /not found/,
+  );
+  // A directory, not a file.
+  assert.throws(
+    () => resolveConfigPath(["--config", "scripts"], repoRoot),
+    /not a directory/,
+  );
 });

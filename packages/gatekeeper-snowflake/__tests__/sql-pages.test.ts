@@ -99,7 +99,6 @@ describe("partitionPager", () => {
   });
 
   it("enforces the cumulative byte budget with whole-row drops and honest truncation", async () => {
-    const expensive = JSON.stringify([["x".repeat(60)]]); // ~62 bytes
     const fetchPartition = vi.fn();
     const pager = partitionPager(
       { rows: [["x".repeat(60)], ["y".repeat(60)]], partitions: [{ rowCount: 2 }] },

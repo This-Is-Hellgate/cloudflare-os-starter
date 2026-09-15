@@ -1,0 +1,76 @@
+// Non-secret CI fixture for `scripts/deploy.ts --check --config scripts/deployment.ci.jsonc`.
+//
+// Every value below is synthetic: the account ID is a syntactically valid dummy, worker names are
+// namespaced so they can never collide with a real deployment, and all optional Gatekeepers are
+// disabled (CI runs with no vendor credentials, and dry runs verify bundling/configuration, not
+// live permissions or secrets). CI uses this file so the release checks never depend on a
+// developer's real `deployment.jsonc` settings.
+{
+  "accountId": "0000000000000000000000000000000a",
+
+  "publicBaseUrl": "https://cloudflare-os-ci-router.ci-subdomain.workers.dev",
+
+  "workers": {
+    "router": {
+      "name": "cloudflare-os-ci-router",
+      "route": { "workersDev": true }
+    },
+    "workshop": { "name": "cloudflare-os-ci-workshop" },
+    "context": { "name": "cloudflare-os-ci-context" },
+    "scheduler": { "name": "cloudflare-os-ci-scheduler" },
+    "customGatekeeper": { "name": "cloudflare-os-ci-custom" },
+    "errorReporter": { "name": "cloudflare-os-ci-errors" }
+  },
+
+  "gatekeepers": {
+    "github": { "enabled": false, "workerName": null },
+    "confluence": { "enabled": false, "workerName": null },
+    "cloudflare": { "enabled": false, "workerName": null },
+    "mcp": { "enabled": false, "workerName": null },
+    "mcpPortal": { "enabled": false, "workerName": null },
+    "snowflake": { "enabled": false, "workerName": null },
+    "huggingface": { "enabled": false, "workerName": null }
+  },
+
+  "access": {
+    "issuer": "https://ci.example.cloudflareaccess.com",
+    "audience": "0000000000000000000000000000000000000000000000000000000000000000",
+    "admins": ["ci@example.com"]
+  },
+
+  "aiGateway": {
+    "enabled": true,
+    "name": "default",
+    "accountId": null,
+    "providers": ["cloudflare"]
+  },
+
+  "context": {
+    "sharingDomain": null,
+    "kvNamespaceId": null
+  },
+
+  "customGatekeeper": {
+    "name": "CI Fixture",
+    "message": "This is the non-secret CI deployment fixture."
+  },
+
+  "errorReporting": {
+    "enabled": true,
+    "environment": "ci",
+    "release": null
+  },
+
+  "resources": {
+    "blueprintsKvNamespaceId": null,
+    "avatarsKvNamespaceId": null,
+    "blueprintContentBucket": null
+  },
+
+  "observability": {
+    "enabled": true,
+    "headSamplingRate": 1,
+    "logs": { "invocationLogs": false },
+    "traces": { "enabled": false, "headSamplingRate": 0.1 }
+  }
+}

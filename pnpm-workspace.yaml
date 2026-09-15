@@ -51,3 +51,7 @@ allowBuilds:
   protobufjs: true
   sharp: true
   workerd: true
+
+minimumReleaseAgeExclude:
+  - '@ai-sdk/gateway@4.0.81'
+  - ai@7.0.101
