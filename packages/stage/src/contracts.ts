@@ -88,7 +88,7 @@ export function canonicalJson(value: unknown): string {
   if (typeof value === "string") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (typeof value === "object") {
-    const keys = Object.keys(value).filter((k) => (value as Record<string, unknown>)[k] !== undefined).sort();
+    const keys = Object.keys(value).filter((k) => (value as Record<string, unknown>)[k] !== undefined).toSorted();
     return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson((value as Record<string, unknown>)[k])}`).join(",")}}`;
   }
   throw new TypeError(`Payload value is not JSON-serializable: ${typeof value}`);

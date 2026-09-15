@@ -73,7 +73,6 @@ export class ExecutionJournal {
   readonly #runExclusive: ExclusiveRunner;
   readonly #gatekeeperId: string;
   readonly #accountId: string | (() => string);
-  readonly #label: string;
   #leaseEpoch: number | null = null;
 
   constructor(options: JournalOptions) {
@@ -81,7 +80,6 @@ export class ExecutionJournal {
     this.#runExclusive = options.runExclusive;
     this.#gatekeeperId = options.gatekeeperId;
     this.#accountId = options.accountId;
-    this.#label = options.label;
   }
 
   /** The owning account identity, resolving a lazy supplier on first use. */
@@ -108,7 +106,7 @@ export class ExecutionJournal {
     for (const [, attempt] of this.#kv.list<ExecutionAttempt>({ prefix: `${ATTEMPT_PREFIX}${actionId}:` })) {
       found.push(attempt);
     }
-    return found.sort((a, b) => a.number - b.number);
+    return found.toSorted((a, b) => a.number - b.number);
   }
 
   async latestAttempt(actionId: number): Promise<ExecutionAttempt | null> {
@@ -313,7 +311,7 @@ export class ExecutionJournal {
     }
     for (const group of byProposal.values()) {
       if (group.length < 2) continue;
-      const ids = group.map((r) => r.actionId as number).sort((a, b) => b - a);
+      const ids = group.map((r) => r.actionId as number).toSorted((a, b) => b - a);
       for (const id of ids.slice(0, -1)) {
         const record = group.find((r) => r.actionId === id);
         if (!record || record.quarantined) continue;

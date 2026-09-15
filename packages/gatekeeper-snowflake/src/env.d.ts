@@ -2,6 +2,11 @@ interface Env {
   SNOWFLAKE_TOKEN: string;
   SNOWFLAKE_ACCOUNT: string;
   SNOWFLAKE_ROLE: string;
+  /**
+   * Operator identity recorded as the trusted approval subject's ownerId (approval provenance).
+   * Defaults to "operator" when unset; it is metadata only and never grants authority.
+   */
+  SNOWFLAKE_USER?: string;
   SNOWFLAKE_DATABASES?: string;
   SNOWFLAKE_SCHEMAS?: string;
   SNOWFLAKE_TABLES?: string;

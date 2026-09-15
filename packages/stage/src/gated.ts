@@ -17,7 +17,7 @@
 // being extracted here; their executor callbacks remain vendor-specific.
 
 import type { ActionRef, ApprovalSubject, ExecutionAttempt } from "./contracts.js";
-import { hashPayload, isExpired } from "./contracts.js";
+import { isExpired } from "./contracts.js";
 import type { ExecutionJournal, ExecutionOutcome, ReceiptInput, VendorProbe } from "./execution.js";
 import type { Stage, StageRecord } from "./stage.js";
 
@@ -168,11 +168,8 @@ export async function proposeAction<P extends { proposalId: string }>(
   // Submission intent: pending is durable before submitAction() runs, so an auto-approved
   // callback racing this call finds an open, appliable record.
   await sink.markActionPending(actionId);
-  try {
-    await submitter.submitAction(actionId, description);
-  } catch (error) {
-    // Delivery outcome unknown: the queue may have received it. Retain and reconcile.
-    throw error;
-  }
+  // Delivery outcome unknown on throw: the queue may have received it. The record stays
+  // pending for reconciliation — this call deliberately does not discard it.
+  await submitter.submitAction(actionId, description);
   return { proposalId: payload.proposalId, actionId };
 }

@@ -29,7 +29,9 @@ describe("Snowflake durable action model", () => {
 
   it("delegates the action ledger to the shared Stage", () => {
     expect(gatekeeper).toContain('new Stage<SnowflakeWriteAction>({ kv: this.ctx.storage.kv, label: "Snowflake" })');
-    expect(gatekeeper).toContain("this.#stage.stage(action)");
+    // The trusted subject is bound at staging time — the DO rebuilds it from its own context,
+    // never from session arguments.
+    expect(gatekeeper).toContain("this.#stage.stage(action, subject)");
     expect(gatekeeper).toContain("this.#stage.markPending(actionId)");
     expect(gatekeeper).toContain("this.#stage.discardStaged(actionId)");
     expect(gatekeeper).toContain("this.#stage.reject(actionId)");
@@ -37,7 +39,7 @@ describe("Snowflake durable action model", () => {
   });
 
   it("delegates the gated write lifecycle to the shared runtime", () => {
-    expect(gatekeeper).toContain('new GatedActions(this.#stage, "Snowflake")');
+    expect(gatekeeper).toContain('new GatedActions(this.#stage, "Snowflake", this.#journal)');
     // applyAction is the overseer's entry point; idempotency and state gating live in
     // @gadgets/stage and are tested behaviorally there.
     expect(gatekeeper).toContain("this.#gated.apply(actionId, {");
@@ -52,7 +54,7 @@ describe("Snowflake durable action model", () => {
 
   it("re-validates the stored payload through the shared policy before executing", () => {
     expect(gatekeeper).toContain("validateWriteProposal(policy, record.operation, record.target, record.sql)");
-    expect(gatekeeper).toContain("async #execute(record: StoredSnowflakeAction)");
+    expect(gatekeeper).toContain("async #execute(record: StoredSnowflakeAction, _attempt:");
   });
 
   it("executes the approved DML against the SQL API with the configured role and warehouse", () => {
@@ -63,7 +65,7 @@ describe("Snowflake durable action model", () => {
   it("executes the approved DML only through the executor callback, whose success the shared runtime records", () => {
     expect(gatekeeper).toContain("statement: record.sql");
     expect(gatekeeper).toContain("this.env.SNOWFLAKE_WAREHOUSE ? { warehouse: this.env.SNOWFLAKE_WAREHOUSE }");
-    expect(gatekeeper).toContain("execute: (record) => this.#execute(record)");
+    expect(gatekeeper).toContain("execute: (stored, attempt) => this.#execute(stored, attempt)");
   });
 
   it("maps stored records onto the public write proposal with honest state", () => {

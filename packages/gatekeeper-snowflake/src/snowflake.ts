@@ -186,7 +186,7 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
   async #trustedSubject(operation: string, resource: string, expiresAt: number): Promise<ApprovalSubject> {
     const policy = snowflakePolicy(this.env);
     const policyVersion = await (await import("@gadgets/stage")).hashPayload({
-      databases: [...policy.databases].sort(), schemas: [...policy.schemas].sort(), tables: [...policy.tables].sort(),
+      databases: [...policy.databases].toSorted(), schemas: [...policy.schemas].toSorted(), tables: [...policy.tables].toSorted(),
       role: this.env.SNOWFLAKE_ROLE, warehouse: this.env.SNOWFLAKE_WAREHOUSE ?? null,
     });
     return {

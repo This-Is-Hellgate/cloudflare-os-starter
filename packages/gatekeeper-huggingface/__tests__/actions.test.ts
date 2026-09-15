@@ -35,7 +35,7 @@ describe("Hugging Face durable action model", () => {
   });
 
   it("delegates the gated write lifecycle to the shared runtime", () => {
-    expect(gatekeeper).toContain('new GatedActions(this.#stage, "Hugging Face")');
+    expect(gatekeeper).toContain('new GatedActions(this.#stage, "Hugging Face", this.#journal)');
     // applyAction is the overseer's entry point; idempotency and state gating live in
     // @gadgets/stage and are tested behaviorally there.
     expect(gatekeeper).toContain("this.#gated.apply(actionId, {");
@@ -45,8 +45,9 @@ describe("Hugging Face durable action model", () => {
   it("refuses to execute while the executor is disabled", () => {
     expect(gatekeeper).toContain("Hugging Face write application is disabled until the action executor is enabled.");
     expect(gatekeeper).toContain("writesEnabled: writesEnabled(this.env)");
-    // Approval is recorded by the shared runtime only after the executor succeeds.
-    expect(gatekeeper).toContain("execute: (record) => this.#execute(record)");
+    // Execution is journaled: the executor receives the attempt and returns receipt inputs with
+    // the vendor's real identifiers (or honest nulls).
+    expect(gatekeeper).toContain("execute: (stored, attempt) => this.#execute(stored, attempt)");
   });
 
   it("executes approved actions only after verification of the stored payload", () => {
@@ -56,7 +57,8 @@ describe("Hugging Face durable action model", () => {
   });
 
   it("maps stored records onto the public write proposal", () => {
-    expect(gatekeeper).toContain("simulated: record.state !== \"approved\"");
+    // Honest state: "simulated" until the execution journal holds a settled success.
+    expect(gatekeeper).toContain("simulated: settled !== \"succeeded\"");
     expect(gatekeeper).toContain("findActionByProposalId");
   });
 });

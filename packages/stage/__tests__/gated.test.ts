@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { GatedActions, proposeAction, Stage, type StageKv, type StageRecord } from "../src/index.js";
+import {
+  ExecutionJournal,
+  GatedActions,
+  proposeAction,
+  Stage,
+  type ApprovalSubject,
+  type StageKv,
+  type StageRecord,
+} from "../src/index.js";
 
 type Payload = { proposalId: string; operation: string; target: string };
 
@@ -29,8 +37,44 @@ function fakeKv(): StageKv {
 function makeHarness() {
   const kv = fakeKv();
   const stage = new Stage<Payload>({ kv, label: "Test" });
-  const gated = new GatedActions(stage, "Test");
-  return { kv, stage, gated };
+  // Single-threaded fake: the real DO satisfies runExclusive with ctx.blockConcurrencyWhile,
+  // which serializes exactly what this identity runner serializes in a single-threaded test.
+  const journal = new ExecutionJournal({
+    kv,
+    runExclusive: (fn) => fn(),
+    gatekeeperId: "test",
+    accountId: "acct-1",
+    label: "Test",
+  });
+  const gated = new GatedActions(stage, "Test", journal);
+  return { kv, stage, gated, journal };
+}
+
+const subject: ApprovalSubject = {
+  ownerId: "owner-1",
+  accountId: "acct-1",
+  workspaceId: "ws-1",
+  operation: "insert",
+  resource: "DB.SCHEMA.T",
+  payloadHash: "bound-at-staging",
+  policyVersion: "v1",
+  expiresAt: Date.now() + 60_000,
+};
+
+/** apply() options for `actionId`: trusted subject + ref plus per-test executor overrides. */
+function applyOptions(
+  journal: ExecutionJournal,
+  actionId: number,
+  overrides: Partial<Parameters<GatedActions<Payload>["apply"]>[1]> = {},
+): Parameters<GatedActions<Payload>["apply"]>[1] {
+  return {
+    writesEnabled: true,
+    disabledMessage: "no",
+    subject,
+    ref: journal.ref(actionId),
+    execute: async () => ({}),
+    ...overrides,
+  };
 }
 
 const payload = (n: number): Payload => ({ proposalId: `p-${n}`, operation: "insert", target: "DB.SCHEMA.T" });
@@ -38,25 +82,36 @@ const description = { title: "T", description: "d", implementsRevert: false };
 
 describe("GatedActions.apply", () => {
   it("executes and records approval for a pending action", async () => {
-    const { stage, gated, kv } = makeHarness();
+    const { stage, gated, journal } = makeHarness();
     const actionId = await stage.stage(payload(1));
     await stage.markPending(actionId);
     let executed: StageRecord<Payload> | undefined;
-    await gated.apply(actionId, { writesEnabled: true, disabledMessage: "no", execute: async (r) => { executed = r; } });
+    const outcome = await gated.apply(actionId, applyOptions(journal, actionId, { execute: async (r) => { executed = r; } }));
+    expect(outcome.status).toBe("succeeded");
     expect(executed?.proposalId).toBe("p-1");
-    expect((kv.get(`action:${actionId}`) as StageRecord<Payload>).state).toBe("approved");
-    expect((kv.get(`action:${actionId}`) as StageRecord<Payload>).appliedAt).toEqual(expect.any(Number));
+    // Decision recorded: terminal approved, retired from live storage.
+    expect((await stage.get(actionId))?.state).toBe("approved");
+    expect((await stage.get(actionId))?.appliedAt).toEqual(expect.any(Number));
+    // Execution journaled separately: durable attempt + receipt with honest vendor nulls.
+    expect(await journal.status(actionId)).toBe("succeeded");
+    const attempt = await journal.latestAttempt(actionId);
+    expect(attempt?.receipt?.vendorId).toBeNull();
+    expect(attempt?.receipt?.requestId).toBe(attempt?.idempotencyKey);
   });
 
   it("is idempotent on re-delivery of an already-approved action", async () => {
-    const { stage, gated } = makeHarness();
+    const { stage, gated, journal } = makeHarness();
     const actionId = await stage.stage(payload(1));
     await stage.markPending(actionId);
     let calls = 0;
-    const execute = async () => { calls += 1; };
-    await gated.apply(actionId, { writesEnabled: true, disabledMessage: "no", execute });
-    await gated.apply(actionId, { writesEnabled: true, disabledMessage: "no", execute });
+    const execute = async () => { calls += 1; return {}; };
+    const first = await gated.apply(actionId, applyOptions(journal, actionId, { execute }));
+    const second = await gated.apply(actionId, applyOptions(journal, actionId, { execute }));
     expect(calls).toBe(1);
+    expect(first.idempotent).toBe(false);
+    // Redelivery reports the settled durable outcome without dispatching again.
+    expect(second.status).toBe("succeeded");
+    expect(second.idempotent).toBe(true);
   });
 
   it("refuses to apply a rejected (retired) action", async () => {
@@ -74,16 +129,20 @@ describe("GatedActions.apply", () => {
       .rejects.toThrow("No queued Test action exists with id 9.");
   });
 
-  it("fails closed behind the operator gate and leaves the record untouched", async () => {
-    const { stage, gated, kv } = makeHarness();
+  it("fails closed behind the operator gate: no dispatch, failed attempt, decision recorded", async () => {
+    const { stage, gated, journal } = makeHarness();
     const actionId = await stage.stage(payload(1));
     await stage.markPending(actionId);
     let calls = 0;
-    const execute = async () => { calls += 1; };
-    await expect(gated.apply(actionId, { writesEnabled: false, disabledMessage: "executor is not enabled", execute }))
-      .rejects.toThrow("executor is not enabled");
+    const execute = async () => { calls += 1; return {}; };
+    const outcome = await gated.apply(actionId, applyOptions(journal, actionId, { writesEnabled: false, disabledMessage: "executor is not enabled", execute }));
     expect(calls).toBe(0);
-    expect((kv.get(`action:${actionId}`) as StageRecord<Payload>).state).toBe("pending");
+    // Decision and execution are separate: the trusted approval is recorded, but "approved"
+    // is never a synonym for success — the execution attempt failed and says so.
+    expect(outcome.status).toBe("failed");
+    expect(outcome.attempt.errorCode).toBe("operator-disabled");
+    expect(await journal.status(actionId)).toBe("failed");
+    expect((await stage.get(actionId))?.state).toBe("approved");
   });
 });
 
@@ -102,7 +161,7 @@ describe("proposeAction", () => {
     expect((kv.get("action:1") as StageRecord<Payload>).state).toBe("pending");
   });
 
-  it("discards the staged record and propagates when the queue rejects the submission", async () => {
+  it("retains the pending record for reconciliation when the queue rejects the submission", async () => {
     const { stage, kv } = makeHarness();
     const sink = {
       stageAction: (p: Payload) => stage.stage(p),
@@ -111,9 +170,11 @@ describe("proposeAction", () => {
     };
     await expect(proposeAction(sink, { submitAction: async () => { throw new Error("policy violation"); } }, payload(1), description))
       .rejects.toThrow("policy violation");
-    // No orphaned action id lingers: the record never reached the queue, so it is gone.
-    expect(await stage.findByProposalId("p-1")).toBeNull();
-    expect(kv.get("action:1")).toBeUndefined();
+    // Delivery outcome is unknown: the queue may own the action even though the call threw,
+    // and an auto-approved callback can arrive after submitAction() fails. The record is
+    // retained as pending for reconciliation — never deleted behind the queue's back.
+    expect((await stage.findByProposalId("p-1"))?.state).toBe("pending");
+    expect(kv.get("action:1")).toBeDefined();
   });
 
   it("does not discard a record that already reached the queue", async () => {
