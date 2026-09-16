@@ -372,11 +372,11 @@ expect(await h.status(ref)).toBe("succeeded");
 **Create:** `docs/code-mode-operator-guide.md`.
 **Modify:** outer provider session/type/catalog code only for demonstrated contract gaps; `docs/gatekeeper-catalog.md`.
 
-- [ ] Document the complete chain: deploy Worker -> enable vendor -> connect/provision account -> authorize resource -> bind resource to workspace/chat -> read generated TypeScript session catalog -> execute Code Mode.
-- [ ] Exercise metadata, `startSession`, observer verification, action simulation, reconnect/credential commit, and account revocation against the pinned contract. Static-token providers must define unsupported reconnect behavior explicitly and preserve account isolation; never simulate successful OAuth.
-- [ ] Use stable suggested names: `SNOWFLAKE`, `HUGGINGFACE`, `NVIDIA`, `GITHUB`, `CONFLUENCE`, `CLOUDFLARE_OBSERVABILITY`, `SCHEDULER`. These are operator binding conventions, not automatic env injection.
-- [ ] Keep optional `getAgentCatalog` as discovery metadata. Generated session types are the method contract. Ensure `types-code.ts` and `types.d.ts` agree through the existing generation/check pattern.
-- [ ] Document that buffered gadget edits require a later agent step before Code Mode execution; never promise a new deployment binding appears halfway through an existing execution.
+- [x] Document the complete chain: deploy Worker -> enable vendor -> connect/provision account -> authorize resource -> bind resource to workspace/chat -> read generated TypeScript session catalog -> execute Code Mode.
+- [x] Exercise metadata, `startSession`, observer verification, action simulation, reconnect/credential commit, and account revocation against the pinned contract. Static-token providers must define unsupported reconnect behavior explicitly and preserve account isolation; never simulate successful OAuth.
+- [x] Use stable suggested names: `SNOWFLAKE`, `HUGGINGFACE`, `NVIDIA`, `GITHUB`, `CONFLUENCE`, `CLOUDFLARE_OBSERVABILITY`, `SCHEDULER`. These are operator binding conventions, not automatic env injection.
+- [x] Keep optional `getAgentCatalog` as discovery metadata. Generated session types are the method contract. Ensure `types-code.ts` and `types.d.ts` agree through the existing generation/check pattern.
+- [x] Document that buffered gadget edits require a later agent step before Code Mode execution; never promise a new deployment binding appears halfway through an existing execution.
 
 **Acceptance:** connected resources appear in the actual model-visible catalog and are callable together, including after reconnect; revoked access fails before provider data is returned.
 
