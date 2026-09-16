@@ -394,7 +394,7 @@ expect(await h.status(ref)).toBe("succeeded");
 **Modify:** deployment catalog/generator/docs.
 
 - [ ] Follow the existing Gatekeeper account/resource/session pattern. Obtain models from a deployment allowlist, not arbitrary endpoint discovery.
-- [ ] Expose `listModels`, `describeModel`, `infer`, and `embed`. Use typed text/chat inference and string-array embedding inputs; reject arbitrary URL, header, or provider JSON passthrough.
+- [ ] Expose the full governed compute surface: `listModels`, `describeModel`, `infer`, `embed`, `rerank`, and multimodal inference/embedding. `infer` accepts typed text/chat messages and OpenAI-compatible image parts (data-URI base64); `embed` accepts string-array inputs and multimodal embedding requests; `rerank` accepts a query plus bounded candidate documents. Reject arbitrary URL, header, or provider JSON passthrough. Image-bearing parts carry per-part and total base64 byte ceilings, an image content-type policy, and image-aware budget pricing; image content is observation-gated and never stored beyond bounded evidence. Exact endpoint shapes, quotas, and pricing are verified at implementation time against NVIDIA's current documentation — not assumed.
 - [ ] Credential is `NVIDIA_API_KEY`; endpoint and allowed models are operator configuration. Default inference timeout 60 seconds, input 256 KiB UTF-8, output 1 MiB, 2 concurrent calls per account, and 8,192 maximum output tokens subject to stricter model limits.
 - [ ] Reserve compute budget, honor cancellation, bound streaming responses, and return typed usage with unknown cost represented explicitly.
 
@@ -601,11 +601,7 @@ as one programmable closed loop — is the M2 architecture. Verification against
 below. Each item carries its own authority review before activation; nothing here bypasses the
 approval/journal discipline.
 
-### Task 9.1: NVIDIA retrieval surface — reranking and multimodal
-
-- [ ] Extend the NVIDIA gatekeeper with `rerank` (query + bounded candidate documents) and multimodal embedding / VLM inference per NVIDIA's current retrieval APIs. Verify the exact endpoints, request/response shapes, quotas, and pricing at implementation time; do not build from assumptions.
-- [ ] Image-bearing inputs ride strictly bounded base64 strings with per-part byte ceilings, total-request ceilings, and the existing UTF-8/policy discipline; image content is never treated as executable or stored beyond bounded evidence.
-- [ ] Multimodal embedding/reranking enables the multimodal extraction program (document/image → embed → retrieve → rerank → VLM extraction → typed facts → Snowflake) with GitHub-held schemas.
+### Task 9.1: ~~NVIDIA retrieval surface~~ — MOVED INTO P3.1 (September 15, operator decision: narrowness without cause is deferral; rerank + multimodal embed + VLM ship with the NVIDIA gatekeeper, including bounded base64 ceilings, image-aware budget pricing, and the image observation-gating review).
 
 ### Task 9.2: Hugging Face artifact lifecycle — Jobs and Inference Endpoints
 
