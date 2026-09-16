@@ -148,7 +148,7 @@ export interface WriteProposal {
 export interface CommitFileChange {
   path: string;
   operation: "add" | "update" | "delete";
-  /** Text content is bounded and never treated as executable by the Gatekeeper. */
+  /** UTF-8 text content, required for add/update and rejected on delete. Binary/LFS payloads are unsupported in V1. */
   content?: string;
 }
 
@@ -185,8 +185,10 @@ export interface HuggingFaceSession {
   /**
    * Queue an externally visible Hub change. The Gatekeeper simulates it and performs
    * the remote operation only after the Workshop approval flow applies the proposal.
+   * V1 commits carry UTF-8 text changes only; `parentCommit` (a commit SHA) binds the
+   * change to the exact state it builds on and enables reconciliation after a timeout.
    */
-  proposeCommit(message: string, changes: CommitFileChange[], revision?: string): Promise<WriteProposal>;
+  proposeCommit(message: string, changes: CommitFileChange[], revision?: string, parentCommit?: string): Promise<WriteProposal>;
   proposeDiscussion(title: string, body: string, pullRequest?: boolean): Promise<WriteProposal>;
   proposeDiscussionComment(number: number, body: string): Promise<WriteProposal>;
   proposeSpaceState(state: "pause" | "resume"): Promise<WriteProposal>;

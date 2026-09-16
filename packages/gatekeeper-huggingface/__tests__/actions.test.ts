@@ -40,6 +40,11 @@ describe("Hugging Face durable action model", () => {
     // @gadgets/stage and are tested behaviorally there.
     expect(gatekeeper).toContain("this.#gated.apply(actionId, {");
     expect(gatekeeper).toContain("writesEnabled: writesEnabled(this.env)");
+    // Commits ride the official NDJSON protocol; the returned OID is the required receipt.
+    expect(gatekeeper).toContain("buildCommitNdjson(commit.records)");
+    expect(gatekeeper).toContain("extractCommitOid(response)");
+    // An uncertain commit is reconciled from parent/expected metadata, never retried blind.
+    expect(gatekeeper).toContain("probeCommit(");
   });
 
   it("refuses to execute while the executor is disabled", () => {
@@ -50,8 +55,8 @@ describe("Hugging Face durable action model", () => {
     expect(gatekeeper).toContain("execute: (stored, attempt) => this.#execute(stored, attempt)");
   });
 
-  it("executes approved actions only after verification of the stored payload", () => {
-    expect(gatekeeper).toContain("Stored commit payload is invalid.");
+  it("re-validates the stored commit through the shared protocol validator before executing", () => {
+    expect(gatekeeper).toContain("Stored commit content does not match the approved payload hashes.");
     expect(gatekeeper).toContain("Stored comment payload is invalid.");
     expect(gatekeeper).toContain("Stored Space payload does not match the bound resource.");
   });
@@ -66,10 +71,12 @@ describe("Hugging Face durable action model", () => {
 describe("Hugging Face proposal policy", () => {
   const session = extractClass("HuggingFaceSessionImpl");
 
-  it("bounds commit size and rejects path traversal", () => {
-    expect(session).toContain("A commit requires 1–50 changes.");
-    expect(session).toContain('c.path.includes("..")');
-    expect(session).toContain('c.path.startsWith("/")');
+  it("validates commits through the shared V1 protocol validator and binds content hashes", () => {
+    // Bounds, traversal rejection, and text-only enforcement live in ndjson.ts and are proven
+    // by the behavioral protocol fixture; the session delegates to that same validator so a
+    // proposal that would be refused at execution time is refused at proposal time.
+    expect(session).toContain("validateCommit({ message, changes, revision, parentCommit })");
+    expect(session).toContain("fileHashes: commit.hashes");
   });
 
   it("bounds discussion and comment payloads", () => {

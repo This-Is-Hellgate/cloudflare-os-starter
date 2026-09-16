@@ -6,6 +6,16 @@ import TYPES_CODE from "./types-code.js";
 import { Stage, GatedActions, ExecutionJournal, proposeAction, type StageRecord } from "@gadgets/stage";
 import type { ActionRef, ApprovalSubject, ExecutionAttempt, ReceiptInput } from "@gadgets/stage";
 import { LivePageSource, offsetPaged, type LivePage } from "@gadgets/cursor";
+import {
+  NDJSON_CONTENT_TYPE,
+  buildCommitNdjson,
+  extractCommitOid,
+  probeCommit,
+  validateCommit,
+  validateRevision,
+  type CommitChange,
+  type CommitFileHash,
+} from "./ndjson.js";
 
 const ICON = { url: "https://huggingface.co/front/assets/huggingface_logo-noborder.svg" };
 const RESOURCES: SupportedResource[] = [
@@ -19,6 +29,14 @@ type GatekeeperProps = { resourceUrl?: string };
 type Queue = Pick<ApprovalQueue, "authorizeObservation" | "submitAction"> & Partial<{ [Symbol.dispose](): void }>;
 type HuggingFaceWriteAction = { proposalId: string; operation: WriteProposal["operation"]; summary: string; data: unknown };
 type StoredHuggingFaceAction = StageRecord<HuggingFaceWriteAction>;
+/** The durable payload of a create_commit action: everything bound at approval time. */
+type StoredCommitPayload = {
+  message: string;
+  changes: CommitChange[];
+  revision?: string;
+  parentCommit?: string;
+  fileHashes?: CommitFileHash[];
+};
 
 function parseResource(raw: string | undefined): Resource {
   if (!raw) throw new Error("HF_RESOURCE_URL is required for a Hugging Face binding.");
@@ -147,16 +165,27 @@ export class HuggingFaceGatekeeper extends DurableObject<Env, GatekeeperProps> i
     const bound = record.subject;
     const subject = await this.#trustedSubject(record.operation, parseResource(this.#url()).id, bound?.expiresAt ?? 0);
     const ref: ActionRef = this.#journal.ref(actionId);
+    // Reconciliation probe for an uncertain commit: compare the revision's HEAD against the
+    // parent commit and the submitted summary. Without that evidence the outcome stays
+    // indeterminate — the Hub has no idempotency key, so never a blind retry.
+    const probe = record.operation === "create_commit"
+      ? async (): Promise<"applied" | "absent" | "unknown"> => {
+          const stored = record.data as StoredCommitPayload;
+          const client = new HubClient(this.env.HF_TOKEN);
+          return probeCommit((url) => client.request(url), apiPath(parseResource(this.#url())), {
+            revision: validateRevision(stored?.revision),
+            summary: (stored?.message ?? "").slice(0, 200),
+            parentCommit: stored?.parentCommit,
+          });
+        }
+      : async (): Promise<"applied" | "absent" | "unknown"> => "unknown";
     const outcome = await this.#gated.apply(actionId, {
       writesEnabled: writesEnabled(this.env),
       disabledMessage: "Hugging Face write application is disabled until the action executor is enabled.",
       subject,
       ref,
       execute: (stored, attempt) => this.#execute(stored, attempt),
-      // The Hub has no idempotency key: an uncertain commit is settled only by a read-back of
-      // the expected tree/commit metadata. Until P1.2 implements that protocol, "unknown" keeps
-      // the attempt indeterminate rather than retrying a write that may exist.
-      probe: async () => "unknown",
+      probe,
     });
     if (outcome.status === "indeterminate") {
       throw new Error(`Hugging Face action ${actionId} is indeterminate: a vendor effect may exist; reconcile by key ${outcome.attempt.idempotencyKey}.`);
@@ -175,19 +204,34 @@ export class HuggingFaceGatekeeper extends DurableObject<Env, GatekeeperProps> i
     const r = parseResource(this.#url());
     switch (record.operation) {
       case "create_commit": {
-        const { message, changes, revision } = record.data as { message: string; changes: CommitFileChange[]; revision?: string };
-        if (!message || !Array.isArray(changes) || changes.length < 1 || changes.length > 50) throw new Error("Stored commit payload is invalid.");
-        for (const c of changes) if (!c?.path || c.path.includes("..") || c.path.startsWith("/") || c.path.length > 512) throw new Error("Stored commit payload is invalid.");
-        const payload = {
-          header: { summary: message.slice(0, 200), description: message },
-          changes: changes.map(c => c.operation === "delete"
-            ? { path: c.path, operation: "delete" }
-            : { path: c.path, operation: c.operation === "add" ? "add" : "update", content: c.content ?? "" }),
+        const stored = record.data as StoredCommitPayload;
+        // Re-validate the STORED payload through the same V1 protocol validator the proposal
+        // used — the durable record is what executes, never session arguments.
+        const commit = await validateCommit({ message: stored.message, changes: stored.changes, revision: stored.revision, parentCommit: stored.parentCommit });
+        // The content hashes bound at approval must still match the stored content: a mismatch
+        // means the record was corrupted after approval, and the write refuses.
+        if (Array.isArray(stored.fileHashes)) {
+          const intact = commit.hashes.length === stored.fileHashes.length
+            && commit.hashes.every((h, i) => h.path === stored.fileHashes?.[i]?.path && h.sha256 === stored.fileHashes?.[i]?.sha256);
+          if (!intact) throw new Error("Stored commit content does not match the approved payload hashes.");
+        }
+        // Official protocol: newline-delimited header/file/deletedFile records.
+        const response = await client.request(apiPath(r, `/commit/${encodeURIComponent(commit.revision)}`), {
+          method: "POST",
+          headers: { "Content-Type": NDJSON_CONTENT_TYPE },
+          body: buildCommitNdjson(commit.records),
+        });
+        // The returned commit OID is the only accepted proof of the write; without it the
+        // executor throws and the attempt stays indeterminate for the probe to settle.
+        const oid = extractCommitOid(response);
+        return {
+          vendorId: oid,
+          version: null,
+          // The parent commit is the content-addressed pre-state; the new OID the post-state.
+          beforeHash: commit.parentCommit ?? null,
+          afterHash: oid,
+          evidenceIds: [`revision:${commit.revision}`, ...(commit.parentCommit ? [`parent:${commit.parentCommit}`] : [])],
         };
-        await client.request(apiPath(r, `/commit/${encodeURIComponent(revision ?? "main")}`), { method: "POST", body: JSON.stringify(payload) });
-        // The Hub's legacy commit response carries no commit OID; P1.2's protocol work binds the
-        // returned OID contract. Until then the receipt is honest: vendorId null.
-        return { vendorId: null, version: null, evidenceIds: [`revision:${revision ?? "main"}`] };
       }
       case "create_discussion": {
         const { title, body, pullRequest } = record.data as { title: string; body: string; pullRequest?: boolean };
@@ -254,8 +298,8 @@ class HuggingFaceSessionImpl extends RpcTarget implements HuggingFaceSession {
   async getModelCard(): Promise<HuggingFaceModelCard> { const r = this.#resource(); if (r.kind !== "model") throw new Error("The bound resource is not a model."); const d = await this.#client().request(apiPath(r)); await this.queue.authorizeObservation({ title: "Read Hugging Face model card", description: `Read bounded metadata for ${r.id}.` }); return { id: d.id ?? r.id, libraryName: d.library_name, pipelineTag: d.pipeline_tag, tags: Array.isArray(d.tags) ? d.tags.slice(0, 100) : [], summary: typeof d.cardData?.model_summary === "string" ? d.cardData.model_summary.slice(0, 4000) : undefined }; }
   async getDatasetInfo(): Promise<HuggingFaceDatasetInfo> { const r = this.#resource(); if (r.kind !== "dataset") throw new Error("The bound resource is not a dataset."); const d = await this.#client().request(apiPath(r)); await this.queue.authorizeObservation({ title: "Read Hugging Face dataset metadata", description: `Read bounded metadata for ${r.id}.` }); return { id: d.id ?? r.id, tags: Array.isArray(d.tags) ? d.tags.slice(0, 100) : [], gated: Boolean(d.gated), private: Boolean(d.private), description: typeof d.description === "string" ? d.description.slice(0, 4000) : undefined }; }
   async getSpaceInfo(): Promise<HuggingFaceSpaceInfo> { const r = this.#resource(); if (r.kind !== "space") throw new Error("The bound resource is not a Space."); const d = await this.#client().request(apiPath(r)); await this.queue.authorizeObservation({ title: "Read Hugging Face Space metadata", description: `Read bounded metadata for ${r.id}.` }); return { id: d.id ?? r.id, sdk: d.sdk, runtime: d.runtime?.stage, private: Boolean(d.private), stage: d.stage }; }
-  async listFiles(path?: string, revision?: string): Promise<HuggingFaceFilePage> { const r = this.#resource(); const clean = (path ?? "").replace(/^\/+/, ""); if (clean.includes("..") || clean.length > 512) throw new Error("Invalid repository path."); const rev = revision ?? "main"; if (!/^[A-Za-z0-9._/-]{1,128}$/.test(rev)) throw new Error("Invalid revision."); const d = await this.#client().request(apiPath(r, `/tree/${encodeURIComponent(rev)}?path=${encodeURIComponent(clean)}&recursive=false&limit=100`)); await this.queue.authorizeObservation({ title: "List Hugging Face files", description: `List bounded paths under ${r.id}.` }); return { entries: (Array.isArray(d) ? d : []).slice(0, 100).map((x: any) => ({ path: String(x.path).slice(0, 512), size: typeof x.size === "number" ? x.size : undefined, type: x.type === "directory" ? "directory" : "file", lfs: x.lfs && { oid: String(x.lfs.oid), size: Number(x.lfs.size) } })), truncated: Array.isArray(d) && d.length >= 100 }; }
-  async readTextFile(path: string, revision = "main", maxBytes = 256_000): Promise<string> { if (path.includes("..") || path.startsWith("/") || path.length > 512 || maxBytes < 1 || maxBytes > 1_000_000) throw new Error("Invalid bounded file request."); const r = this.#resource(); const d = await this.#client().request(`https://huggingface.co/${r.kind === "model" ? "" : `${r.kind}s/`}${r.id}/resolve/${encodeURIComponent(revision)}/${path}`); const text = String(d); await this.queue.authorizeObservation({ title: "Read Hugging Face text file", description: `Read a bounded text file from ${r.id}.` }); return text.slice(0, maxBytes); }
+  async listFiles(path?: string, revision?: string): Promise<HuggingFaceFilePage> { const r = this.#resource(); const clean = (path ?? "").replace(/^\/+/, ""); if (clean.includes("..") || clean.length > 512) throw new Error("Invalid repository path."); const rev = validateRevision(revision); const d = await this.#client().request(apiPath(r, `/tree/${encodeURIComponent(rev)}?path=${encodeURIComponent(clean)}&recursive=false&limit=100`)); await this.queue.authorizeObservation({ title: "List Hugging Face files", description: `List bounded paths under ${r.id}.` }); return { entries: (Array.isArray(d) ? d : []).slice(0, 100).map((x: any) => ({ path: String(x.path).slice(0, 512), size: typeof x.size === "number" ? x.size : undefined, type: x.type === "directory" ? "directory" : "file", lfs: x.lfs && { oid: String(x.lfs.oid), size: Number(x.lfs.size) } })), truncated: Array.isArray(d) && d.length >= 100 }; }
+  async readTextFile(path: string, revision = "main", maxBytes = 256_000): Promise<string> { if (path.includes("..") || path.startsWith("/") || path.length > 512 || maxBytes < 1 || maxBytes > 1_000_000) throw new Error("Invalid bounded file request."); const r = this.#resource(); const rev = validateRevision(revision); const d = await this.#client().request(`https://huggingface.co/${r.kind === "model" ? "" : `${r.kind}s/`}${r.id}/resolve/${encodeURIComponent(rev)}/${path}`); const text = String(d); await this.queue.authorizeObservation({ title: "Read Hugging Face text file", description: `Read a bounded text file from ${r.id}.` }); return text.slice(0, maxBytes); }
   async queryDataset(options?: DatasetQueryOptions): Promise<DatasetQueryResult> {
     const r = this.#resource();
     if (r.kind !== "dataset") throw new Error("Dataset queries require a bound dataset.");
@@ -428,7 +472,20 @@ class HuggingFaceSessionImpl extends RpcTarget implements HuggingFaceSession {
     });
     return { proposalId: payload.proposalId, actionId, operation, summary, simulated: true };
   }
-  async proposeCommit(message: string, changes: CommitFileChange[], revision?: string): Promise<WriteProposal> { if (!message || changes.length < 1 || changes.length > 50) throw new Error("A commit requires 1–50 changes."); boundedString(message, 500, "message"); for (const c of changes) { if (!c.path || c.path.includes("..") || c.path.startsWith("/") || c.path.length > 512) throw new Error("Invalid commit path."); if (c.operation !== undefined && !["add", "update", "delete"].includes(c.operation)) throw new Error("Invalid commit operation."); if (c.content !== undefined) boundedString(c.content, 1_000_000, "file content"); } const detail = [`Commit message: ${message}`, `Revision: ${revision ?? "main"}`, `Changes (${changes.length}):`, ...changes.map(c => `- ${c.operation ?? "update"} \`${c.path}\`${c.content !== undefined ? ` (${c.content.length} bytes)` : ""}`)].join("\n"); return this.#proposal("create_commit", `Propose a commit to ${this.#resource().id}.`, { message, changes, revision }, detail); }
+  async proposeCommit(message: string, changes: CommitFileChange[], revision?: string, parentCommit?: string): Promise<WriteProposal> {
+    // The SAME V1 protocol validator the executor will run: a proposal that would be refused at
+    // execution time is refused here, and the per-file content hashes it computes are stored in
+    // the payload — repository, revision, parent commit, paths, and content are bound to approval.
+    const commit = await validateCommit({ message, changes, revision, parentCommit });
+    const detail = [
+      `Commit message: ${message}`,
+      `Revision: ${commit.revision}`,
+      ...(parentCommit ? [`Parent commit: ${parentCommit}`] : []),
+      `Changes (${commit.files.length} text file${commit.files.length === 1 ? "" : "s"}, ${commit.deletions.length} deletion${commit.deletions.length === 1 ? "" : "s"}):`,
+      ...changes.map(c => `- ${c.operation} \`${c.path}\`${c.content !== undefined ? " (text)" : ""}`),
+    ].join("\n");
+    return this.#proposal("create_commit", `Propose a commit to ${this.#resource().id}.`, { message, changes, revision, parentCommit, fileHashes: commit.hashes }, detail);
+  }
   async proposeDiscussion(title: string, body: string, pullRequest = false): Promise<WriteProposal> { const t = boundedString(title, 300, "title"); const b = boundedString(body, 20_000, "body"); const detail = `${pullRequest ? "Pull request" : "Discussion"} titled "${t}" with body:\n\n${b.slice(0, 2000)}${b.length > 2000 ? "\n…(truncated)" : ""}`; return this.#proposal("create_discussion", "Propose a Hugging Face discussion.", { title: t, body: b, pullRequest }, detail); }
   async proposeDiscussionComment(number: number, body: string): Promise<WriteProposal> { if (!Number.isInteger(number) || number < 1) throw new Error("Invalid discussion number."); const b = boundedString(body, 20_000, "body"); const detail = `Comment on discussion #${number}:\n\n${b.slice(0, 2000)}${b.length > 2000 ? "\n…(truncated)" : ""}`; return this.#proposal("comment_discussion", "Propose a Hugging Face discussion comment.", { number, body: b }, detail); }
   async proposeSpaceState(state: "pause" | "resume"): Promise<WriteProposal> { if (this.#resource().kind !== "space") throw new Error("Space state changes require a bound Space."); return this.#proposal(state === "pause" ? "pause_space" : "resume_space", `Propose to ${state} the Space.`, { state }, `Set the Space runtime state to **${state}**.`); }
