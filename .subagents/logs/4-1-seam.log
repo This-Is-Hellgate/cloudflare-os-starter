@@ -1,8 +1,0 @@
-The document is complete and verified: 212 lines, exactly the five required sections, every symbol and quote checked against the pinned kernel source (agent-spawner-binding.d.ts, overseer.ts, agent.ts, gatekeeper-scheduler types/README/scheduler.ts/schedule-driver.ts, the design plan, and the P4/P5 plan).
-
-Key findings while writing:
-- The seam is fully real in the kernel: `getEnvForLoader` facet env + `"allow_irrevocable_stub_storage"` → `this.ctx.restore()` → `ScheduleSessionImpl` → `bindHook`/`BoundHookRecord` → `enableHookRecord` → `ScheduleDriver` alarm → `startHook` → `makeHookFiringCallback` → restored `onSchedule`.
-- The redesigned `spawnCallable(title, {types, mainType})` is implemented, including the migration guard, durable `pendingAgentCalls`, and restart-tested draining.
-- Three seam gaps for P4 found: unproven CallableAgent-stub store-and-reinvoke across restart, unproven `spawnCallable` from a restored hook callback, and no workspace-code-reachable hook cancellation (owner-UI-only `disableHook`).
-
-DONE docs/task-runtime-integration.md 3

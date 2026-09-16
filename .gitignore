@@ -5,3 +5,4 @@ packages/*/wrangler.prod.jsonc
 deployment.local.jsonc
 .secrets/
 packages/*/worker-configuration.d.ts
+.subagents/
