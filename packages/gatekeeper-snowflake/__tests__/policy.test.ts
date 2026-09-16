@@ -89,16 +89,16 @@ describe("validateWriteProposal", () => {
     expect(r).toEqual({ table: "ANALYTICS.PUBLIC.EVENTS", database: "ANALYTICS", schema: "PUBLIC" });
   });
 
-  it("rejects non-DML operations and unqualified targets", () => {
-    expect(() => validateWriteProposal(policy, "delete", "A.B.C", "DELETE FROM A.B.C")).toThrow("Only bounded INSERT, UPDATE, or MERGE proposals are permitted.");
+  it("rejects non-governed operations and unqualified targets", () => {
+    expect(() => validateWriteProposal(policy, "drop", "A.B.C", "DROP TABLE A.B.C")).toThrow("Only bounded INSERT, UPDATE, DELETE, MERGE, or plan proposals are permitted.");
     expect(() => validateWriteProposal(policy, "insert", "A.B", "INSERT INTO A.B VALUES (1)")).toThrow("Write target must be DATABASE.SCHEMA.TABLE.");
     expect(() => validateWriteProposal(policy, "insert", "OTHER.S.T", "INSERT INTO OTHER.S.T VALUES (1)")).toThrow("Table is outside the configured allowlist.");
   });
 
   it("rejects operation-prefix mismatches and destructive keywords", () => {
-    expect(() => validateWriteProposal(unrestricted, "update", "A.S.T", "INSERT INTO A.S.T VALUES (1)")).toThrow("Only bounded INSERT, UPDATE, or MERGE proposals are permitted.");
-    expect(() => validateWriteProposal(unrestricted, "insert", "A.S.T", "INSERT INTO A.S.T VALUES (1); DROP TABLE X")).toThrow("Only bounded INSERT, UPDATE, or MERGE proposals are permitted.");
-    expect(() => validateWriteProposal(unrestricted, "merge", "A.S.T", "MERGE INTO A.S.T USING (SELECT 1) S ON TRUE WHEN MATCHED THEN DELETE")).toThrow("Only bounded INSERT, UPDATE, or MERGE proposals are permitted.");
+    expect(() => validateWriteProposal(unrestricted, "update", "A.S.T", "INSERT INTO A.S.T VALUES (1)")).toThrow("Only bounded INSERT, UPDATE, DELETE, MERGE, or plan proposals are permitted.");
+    expect(() => validateWriteProposal(unrestricted, "insert", "A.S.T", "INSERT INTO A.S.T VALUES (1); DROP TABLE X")).toThrow("Only bounded INSERT, UPDATE, DELETE, MERGE, or plan proposals are permitted.");
+    expect(() => validateWriteProposal(unrestricted, "merge", "A.S.T", "MERGE INTO A.S.T USING (SELECT 1) S ON TRUE WHEN MATCHED THEN DELETE")).toThrow("Only bounded INSERT, UPDATE, DELETE, MERGE, or plan proposals are permitted.");
   });
 
   it("bounds the SQL size", () => {

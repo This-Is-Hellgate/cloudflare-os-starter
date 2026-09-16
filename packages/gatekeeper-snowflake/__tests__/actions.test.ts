@@ -86,7 +86,7 @@ describe("Snowflake write proposal policy", () => {
   });
 
   it("keeps the operation and destructive-keyword rules in the policy module", () => {
-    expect(policySource).toContain("Only bounded INSERT, UPDATE, or MERGE proposals are permitted.");
+    expect(policySource).toContain("Only bounded INSERT, UPDATE, DELETE, MERGE, or plan proposals are permitted.");
     expect(policySource).toContain("new RegExp(`^${operation}");
     expect(policySource).toMatch(/DROP\|TRUNCATE\|ALTER\|CREATE\|GRANT\|REVOKE\|CALL\|DELETE/);
   });

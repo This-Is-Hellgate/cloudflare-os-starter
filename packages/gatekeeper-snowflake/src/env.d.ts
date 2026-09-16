@@ -20,6 +20,10 @@ interface Env {
   SNOWFLAKE_CORTEX_SEMANTIC_VIEWS?: string;
   /** Comma-separated allowlist of DATABASE.SCHEMA.SERVICE Cortex Search services. */
   SNOWFLAKE_CORTEX_SEARCH_SERVICES?: string;
+  /** Comma-separated write-function allowlist for governed writes; replaces the built-in default when set. */
+  SNOWFLAKE_WRITE_FUNCTIONS?: string;
+  /** JSON array of preauthorization patterns: [{name, operations, target, maxRows}]. Empty/absent = every write takes the approval queue. */
+  SNOWFLAKE_WRITE_PREAUTHORIZATIONS?: string;
   /** Rows delivered per result page (docs profile: default 100, hard maximum 500). */
   SNOWFLAKE_RESULT_ROWS_PER_PAGE?: string;
   /** Service fetches one result cursor may make (docs profile: default 10, hard maximum 100). */
