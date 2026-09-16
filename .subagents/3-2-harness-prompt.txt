@@ -1,0 +1,25 @@
+You are a subagent working inside the repository C:/Users/mchay/cloudflare-os-starter. Your job is ONE isolated task. Do not commit, do not run pnpm install, do not run pnpm test, and do not modify any file outside the NEW package directory listed under OUTPUT. If a command fails, note it and continue.
+
+TASK: Create the minimal `packages/operating-environment-tests` consumer package (plan Task 3.2) — a thin wrapper around the pinned upstream harness, NOT a fork.
+
+STUDY FIRST (all under C:/Users/mchay/cloudflare-os-starter/cloudflare-os/packages/integration-tests/):
+- README.md
+- src/harness.ts — note how it resolves the workshop/gatekeeper package dirs (WORKSHOP_DIR/REPO_ROOT relative to its own file location) and what startHarness/createHarness accepts as WorkerConfig (a zod schema: name/main/account_id/ai/build/services/vars/etc.)
+- src/network-interceptor.ts (NetworkInterceptor: patch fetch, throw on unmatched)
+- src/rpc-client.ts (Cap'n Web over WebSocket)
+- package.json (exports map: ./harness ./agent-session ./network-interceptor ./rpc-client ./mock-model)
+- Also read docs/superpowers/plans/2026-09-15-full-code-mode-and-gatekeepers.md section "Task 3.2" and the scenario table in "6. Verification budget" (scenarios A-E).
+- And read docs/superpowers/plans/2026-09-15-full-code-mode-and-gatekeepers.md "Task 3.1"/"Task 3.3" context: our outer gatekeeper packages live OUTSIDE the submodule at C:/Users/mchay/cloudflare-os-starter/packages/gatekeeper-snowflake and gatekeeper-nvidia. The upstream harness resolves sibling dirs RELATIVE TO ITSELF, so the first question is whether it can point at external package dirs.
+
+CREATE the package C:/Users/mchay/cloudflare-os-starter/packages/operating-environment-tests/ with:
+1. package.json — name "operating-environment-tests", private, type module, scripts: types:check (tsc --noEmit), test:run (vitest run). devDependencies mirroring sibling packages (typescript/vite/vitest/wrangler from catalog:, @types/node). Add a DEPENDENCY on the upstream toolkit via relative source import (do NOT add it to pnpm dependencies — import via a relative path like ../../cloudflare-os/packages/integration-tests/src/harness.ts, since it is source-only and not published; check how the kernel's own workshop-evals package imports it and mirror that exactly — read cloudflare-os/packages/workshop-evals/package.json and its imports).
+2. tsconfig.json — mirror the sibling packages' tsconfig (extends ../../cloudflare-os/tsconfig.json, paths for @gadgets/stage etc., include src).
+3. vite.config.ts + vitest.config.ts — mirror siblings (vitest include __tests__/*.test.ts).
+4. src/harness-adapter.ts — the adapter: a function that maps our OUTER gatekeeper package dirs + the kernel's workshop-backend dir into whatever startHarness/createHarness accepts (WorkerConfig[]), with an explicit "WORKS ONLY IF upstream resolves arbitrary absolute dirs" verification: if harness.ts hardcodes paths relative to its own location such that external dirs cannot work, write a clearly-commented adapter that copies each needed wrangler.jsonc into an in-memory WorkerConfig instead (name/main/build/services/vars from the package's own wrangler.jsonc parsed with jsonc-parser). Document every assumption in comments. Do NOT import cloudflare:workers anywhere.
+5. __tests__/smoke.test.ts — ONE test that asserts the adapter builds WorkerConfigs for workshop-backend + gatekeeper-snowflake + gatekeeper-nvidia from their real wrangler.jsonc files (pure file/parse assertions, NO wrangler boot, NO network). This must pass under plain `npx vitest run` in node.
+6. src/scenarios.ts — empty exported stubs documenting scenarios A-E (names + one-line intent each, from the plan). No implementations.
+
+Constraints: NO implementation of scenario logic beyond stubs. NO changes outside packages/operating-environment-tests/. Plain JSON5 comments not needed — keep configs minimal and valid.
+
+When done, run `npx tsc --noEmit` and `npx vitest run` inside the new package and iterate until both pass (vitest may fail if workspace deps are unlinked — if so, say so explicitly in your final line; do NOT run pnpm install).
+OUTPUT: the new package directory only. When done print: DONE packages/operating-environment-tests tsc=<pass|fail> vitest=<pass|fail|blocked>

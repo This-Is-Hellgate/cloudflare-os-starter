@@ -28,6 +28,7 @@ const validConfig: DeploymentConfig = {
     errorReporter: { name: "acme-cloudflare-os-errors" },
   },
   gatekeepers: {
+    taskRuntime: { enabled: false, workerName: null },
     nvidia: { enabled: false, workerName: null },
     github: { enabled: false, workerName: null },
     confluence: { enabled: false, workerName: null },

@@ -19,6 +19,7 @@ export type AiGatewayProvider = "anthropic" | "openai" | "google" | "cloudflare"
 /** The optional external integrations this Starter can install as separate Gatekeeper Workers. */
 export type OptionalGatekeeperId =
   | "nvidia"
+  | "taskRuntime"
   | "github"
   | "confluence"
   | "cloudflare"
@@ -59,6 +60,18 @@ export interface GatekeeperCatalogEntry {
  * it in a later change, after each package's bindings and secret contract have been reviewed.
  */
 export const OPTIONAL_GATEKEEPER_CATALOG: Record<OptionalGatekeeperId, GatekeeperCatalogEntry> = {
+  // The durable task runtime: SERVICE-ONLY. The Workshop binds it for mount management and the
+  // coordinator talks to it over RPC; the Router never discovers it (publicFlow: false).
+  taskRuntime: {
+    packageDir: "packages/gatekeeper-task-runtime",
+    binding: "GATEKEEPER_TASK_RUNTIME",
+    routePrefix: "/gatekeeper/task-runtime",
+    auth: "endpoint",
+    publicFlow: false,
+    entrypoint: "GatekeeperVendor",
+    // The task runtime holds task policy and continuity, never vendor secrets.
+    secrets: [],
+  },
   nvidia: {
     packageDir: "packages/gatekeeper-nvidia",
     binding: "GATEKEEPER_NVIDIA",
@@ -171,7 +184,7 @@ export const AI_GATEWAY_PROVIDERS: readonly AiGatewayProvider[] =
  * half-wired.
  */
 export const WIRED_GATEKEEPERS: readonly OptionalGatekeeperId[] = [
-  "nvidia", "github", "confluence", "cloudflare", "mcpv2", "mcpPortal", "snowflake", "huggingface",
+  "taskRuntime", "nvidia", "github", "confluence", "cloudflare", "mcpv2", "mcpPortal", "snowflake", "huggingface",
 ];
 
 /**

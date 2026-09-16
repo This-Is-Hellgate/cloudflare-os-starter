@@ -39,6 +39,7 @@
   // Optional integrations are explicit separate Workers. They are disabled until their package,
   // bindings, credentials, and security review are complete. Do not put secrets in this file.
   "gatekeepers": {
+    "taskRuntime": { "enabled": false, "workerName": null },
     "nvidia": { "enabled": false, "workerName": null },
     "github": { "enabled": false, "workerName": null },
     "confluence": { "enabled": false, "workerName": null },
