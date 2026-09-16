@@ -1,0 +1,26 @@
+{
+  "name": "@gadgets/mcp-portal-gatekeeper",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./src/portal.ts",
+  "scripts": {
+    "dev": "echo \"run 'pnpm dev-server' in the root directory instead\" >&2 && exit 1",
+    "deploy": "vp run --no-cache build:configurator && wrangler deploy",
+    "clean": "rm -rf dist src/generated",
+    "test:run": "vitest run"
+  },
+  "dependencies": {
+    "@gadgets/backend-utils": "workspace:*",
+    "@gadgets/configurator-ui": "workspace:*",
+    "@gadgets/mcp-shared": "workspace:*",
+    "@gadgets/workshop-shared": "workspace:*",
+    "capnweb": "catalog:",
+    "capnweb-validate": "catalog:"
+  },
+  "devDependencies": {
+    "@gadgets/scripts": "workspace:*",
+    "typescript": "catalog:",
+    "vitest": "catalog:",
+    "wrangler": "catalog:"
+  }
+}
