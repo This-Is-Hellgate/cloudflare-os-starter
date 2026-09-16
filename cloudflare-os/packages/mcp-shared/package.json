@@ -1,0 +1,45 @@
+{
+  "name": "@gadgets/mcp-shared",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./account": "./src/account.ts",
+    "./base-types": "./src/base-types.ts",
+    "./client": "./src/client.ts",
+    "./connect-nonce": "./src/connect-nonce.ts",
+    "./connection": "./src/connection.ts",
+    "./endpoint": "./src/endpoint.ts",
+    "./fetch": "./src/fetch.ts",
+    "./facet": "./src/facet.ts",
+    "./html": "./src/html.ts",
+    "./http": "./src/http.ts",
+    "./log": "./src/log.ts",
+    "./portal": "./src/portal.ts",
+    "./schema-to-ts": "./src/schema-to-ts.ts",
+    "./scope": "./src/scope.ts",
+    "./session": "./src/session.ts",
+    "./tools": "./src/tools.ts",
+    "./types": "./src/types.d.ts",
+    "./user": "./src/user.ts",
+    "./util": "./src/util.ts"
+  },
+  "scripts": {
+    "build": "tsc && tsc -p tsconfig.test.json",
+    "clean": "rm -rf dist",
+    "test:run": "vitest run"
+  },
+  "dependencies": {
+    "@gadgets/backend-utils": "workspace:*",
+    "@gadgets/gatekeeper-kit": "workspace:*",
+    "@gadgets/workshop-shared": "workspace:*",
+    "@modelcontextprotocol/client": "2.0.0"
+  },
+  "devDependencies": {
+    "@gadgets/scripts": "workspace:*",
+    "@types/node": "^26.1.0",
+    "typescript": "catalog:",
+    "typescript6": "npm:typescript@6.0.3",
+    "vitest": "catalog:"
+  }
+}

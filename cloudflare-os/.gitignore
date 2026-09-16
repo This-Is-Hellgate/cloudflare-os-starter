@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+# Generated gatekeeper UI bundles, rebuilt as a prerequisite of build/deploy
+packages/gatekeeper-*/src/generated/*-configurator-ui.txt
+packages/gatekeeper-*/src/generated/*-configurator-ui.js*
+packages/gatekeeper-*/src/generated/app.txt
+# Bundled blueprints (regenerated at build time from BUNDLED_BLUEPRINTS_DIR).
+packages/workshop-backend/src/generated/bundled-blueprints.ts
+packages/workshop-backend/src/generated/browser-export-runtime.txt
+packages/workshop-backend/src/generated/html-sanitizer-runtime.txt
+packages/workshop-backend/src/generated/browser-export-page.js
+
+# TypeScript build info
+*.tsbuildinfo
+
+# run-local build cache stamp
+.run-local-stamp
+
+# Cloudflare Workers
+.wrangler
+.env
+
+# Local dev secrets (loaded by run-dev-server.ts)
+.dev.vars*
+
+# Site-specific deployment configs.
+wrangler.prod.jsonc
+wrangler.staging.jsonc
+
+# Site-specific dev server configs.
+wrangler.dev.jsonc
+
+# Scratch output from scripts/preview (the PR-preview comment body).
+/output/
+
+# macOS
+.DS_Store
+
+# Wrangler local dev secrets (never commit). Matches root and per-package .dev.vars files.
+.dev.vars
+.dev.vars.*
+**/.dev.vars
+**/.dev.vars.*
