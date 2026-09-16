@@ -400,6 +400,21 @@ expect(await h.status(ref)).toBe("succeeded");
 
 Before P4, enforce compute reservations in the NVIDIA account DO using an operator-configured finite spend/call allowance. P4 adds the stricter shared task reservation in front of this account ceiling; the provider ceiling remains in force. This avoids making P3 depend on the later task runtime.
 
+**Capability families (September 15, operator taxonomy).** The surface is method-based; families are realized through the deployment allowlist and per-model operator notes, not separate methods:
+
+| Family | Governed status |
+| --- | --- |
+| learn | In scope — the education-material workload (worksheets, handwriting, diagrams, textbook pages) is the primary consumer of vision + retrieval + inference |
+| inference | In — `infer` (text and VLM image parts) |
+| retrieval | In — `embed` (text and multimodal) + `rerank` |
+| vision | In — VLM chat parts + multimodal embeddings |
+| evaluation | Via P8 — the workshop-evals substrate for ungoverned comparison runs, the governed tournament for production decisions |
+| compute | Partial — endpoint compute under the account allowance; GPU provisioning itself is excluded (same review path as training) |
+| training | Deferred — weights, transfer, and batch jobs are excluded by the end-state spec; P9.2 is the reviewed path to revisit |
+| simulation | Deferred — long-running/heavy compute requires its own bounded-resource review |
+| optimization | Deferred — model-optimization tooling gets its own review |
+| scientific | In through model choice — domain NIMs ride the same `infer`/`embed`/`rerank` surface once allowlisted; no new methods |
+
 **Focused verification:** one provider-session scenario covering authorization before network, allowed inference, and a denied model/oversized response. Reuse its adapter fixture in the integration suite.
 
 ### Task 3.3: Bounded Hugging Face model and dataset discovery
