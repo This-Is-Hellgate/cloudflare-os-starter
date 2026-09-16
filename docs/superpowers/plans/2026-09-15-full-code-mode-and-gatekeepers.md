@@ -275,13 +275,13 @@ pnpm exec wrangler --version
 
 Create the minimal shared integration package and persistence fixture listed in Task 3.2 **during this task**, so P1's recovery gate is executable before P2 begins. P3 expands that same harness to Workshop composition; it does not create a second harness. Add only the package configuration, harness, and mutation scenario required at this point.
 
-- [ ] Implement separate decision/execution records from section 4.1. Keep upstream action IDs numeric and preserve account scoping.
-- [ ] Make private queue-driven `apply()` the only approval execution entry. Remove staged-to-executed shortcuts and refuse expired/rejected/foreign actions before vendor I/O.
-- [ ] Make queue submission safe when an auto-approved callback arrives before `submitAction()` returns. Persist a submission intent and pending state first; if delivery outcome is unknown, retain and reconcile it rather than deleting an action the queue may own.
-- [ ] Bind exact normalized payload hash, owner, account, workspace, policy version, and expiry. Recheck scope and current policy at execution time.
-- [ ] Treat invocation through the owning upstream approval capability as the trusted decision signal; possession of an action ID or an editable `approved` field is insufficient. Preserve approval identity and provenance in the journal. Supply no model-visible method that manufactures that signal.
-- [ ] Add atomic attempt claims in the owning DO, immutable attempts, durable receipts, and indeterminate recovery. Never mark approved as a synonym for success.
-- [ ] Migrate old rejected records to terminal rejected; old approved records to historical success with `legacy-receipt-unavailable` provenance, without fabricating vendor receipts or reexecuting. Require resubmission of legacy open proposals lacking approval hashes. If live/retired duplicates conflict, quarantine for operator reconciliation.
+- [x] Implement separate decision/execution records from section 4.1. Keep upstream action IDs numeric and preserve account scoping.
+- [x] Make private queue-driven `apply()` the only approval execution entry. Remove staged-to-executed shortcuts and refuse expired/rejected/foreign actions before vendor I/O.
+- [x] Make queue submission safe when an auto-approved callback arrives before `submitAction()` returns. Persist a submission intent and pending state first; if delivery outcome is unknown, retain and reconcile it rather than deleting an action the queue may own.
+- [x] Bind exact normalized payload hash, owner, account, workspace, policy version, and expiry. Recheck scope and current policy at execution time.
+- [x] Treat invocation through the owning upstream approval capability as the trusted decision signal; possession of an action ID or an editable `approved` field is insufficient. Preserve approval identity and provenance in the journal. Supply no model-visible method that manufactures that signal.
+- [x] Add atomic attempt claims in the owning DO, immutable attempts, durable receipts, and indeterminate recovery. Never mark approved as a synonym for success.
+- [x] Migrate old rejected records to terminal rejected; old approved records to historical success with `legacy-receipt-unavailable` provenance, without fabricating vendor receipts or reexecuting. Require resubmission of legacy open proposals lacking approval hashes. If live/retired duplicates conflict, quarantine for operator reconciliation.
 
 **Focused verification:** one table-driven terminal transition regression and one execution scenario containing replay, race, and crash-after-vendor-success checkpoints. Assert vendor invocation count and durable outcome, not private helper calls.
 
@@ -301,10 +301,10 @@ expect(await h.status(ref)).toBe("succeeded");
 
 **Modify:** `packages/gatekeeper-huggingface/src/huggingface.ts`, `types.d.ts`, `types-code.ts`, `SECURITY-REVIEW.md`; existing `__tests__/actions.test.ts`.
 
-- [ ] Serialize Hub commits as newline-delimited header/file/deletedFile records according to the official Hub implementation; send `application/x-ndjson`.
-- [ ] V1 permits UTF-8 text additions/updates and file deletion only. Encode text as required by the Hub file record; reject binary/LFS operations, path traversal, empty changes, and malformed revisions.
-- [ ] Bind the repository, revision, parent commit, paths, and content hashes to approval. Require returned commit OID; persist it before reporting success.
-- [ ] On timeout after submission, reconcile using the parent/expected commit/tree metadata. Do not assume the endpoint has an idempotency key; uncertain results remain indeterminate.
+- [x] Serialize Hub commits as newline-delimited header/file/deletedFile records according to the official Hub implementation; send `application/x-ndjson`.
+- [x] V1 permits UTF-8 text additions/updates and file deletion only. Encode text as required by the Hub file record; reject binary/LFS operations, path traversal, empty changes, and malformed revisions.
+- [x] Bind the repository, revision, parent commit, paths, and content hashes to approval. Require returned commit OID; persist it before reporting success.
+- [x] On timeout after submission, reconcile using the parent/expected commit/tree metadata. Do not assume the endpoint has an idempotency key; uncertain results remain indeterminate.
 
 **Focused verification:** one official-protocol fixture through the real request serializer, including Unicode content, deletion, parent commit, and OID extraction. Extend the existing denial case for unsupported payloads.
 
@@ -325,12 +325,12 @@ expect(await h.status(ref)).toBe("succeeded");
 **Modify:** `packages/gatekeeper-snowflake/src/policy.ts`, `snowflake.ts`, `types.d.ts`, `types-code.ts`, `env.d.ts`, `SECURITY-REVIEW.md`; existing policy/actions suites.
 **Create:** `packages/gatekeeper-snowflake/src/write-plan.ts`.
 
-- [ ] Replace public free-form write SQL with `insert`, `update`, and `merge` structured proposals. Reject the old SQL-write interface with a migration message; do not silently reinterpret it.
-- [ ] Qualified tables contain exactly database/schema/table components. Quote identifiers using Snowflake rules; bind scalar values. Build merge sources from bounded structured rows/columns, not SQL fragments. Predicate nodes permit comparisons, null checks, and bounded AND/OR groups; deny expressions, functions, subqueries, and empty update predicates.
-- [ ] Implement discriminated mutation variants with operation-specific required fields; generated SQL alone is executable. Store its hash and bindings hash in the approved payload.
-- [ ] Force configured read/write roles and warehouse. The read role's vendor RBAC limits objects for free-form read SQL; the statement-class guard is not object authorization.
-- [ ] For writes, persist a stable SQL API request identifier and statement handle; reconcile documented retry/result semantics before reissuing. Deny multi-statement requests and unapproved object creation.
-- [ ] Bound affected rows where enforceable; otherwise label estimates and require narrower predicates/explicit owner approval. Do not promise a preflight SELECT guarantees the later affected row count.
+- [x] Replace public free-form write SQL with `insert`, `update`, and `merge` structured proposals. Reject the old SQL-write interface with a migration message; do not silently reinterpret it.
+- [x] Qualified tables contain exactly database/schema/table components. Quote identifiers using Snowflake rules; bind scalar values. Build merge sources from bounded structured rows/columns, not SQL fragments. Predicate nodes permit comparisons, null checks, and bounded AND/OR groups; deny expressions, functions, subqueries, and empty update predicates.
+- [x] Implement discriminated mutation variants with operation-specific required fields; generated SQL alone is executable. Store its hash and bindings hash in the approved payload.
+- [x] Force configured read/write roles and warehouse. The read role's vendor RBAC limits objects for free-form read SQL; the statement-class guard is not object authorization.
+- [x] For writes, persist a stable SQL API request identifier and statement handle; reconcile documented retry/result semantics before reissuing. Deny multi-statement requests and unapproved object creation.
+- [x] Bound affected rows where enforceable; otherwise label estimates and require narrower predicates/explicit owner approval. Do not promise a preflight SELECT guarantees the later affected row count.
 
 **Focused verification:** extend the existing policy regression to demonstrate that allowlisted table A cannot be paired with SQL for table B; cover structured compilation and bound values in the same fixture. Extend the read request case to prove role/warehouse are operator-selected.
 
@@ -341,11 +341,11 @@ expect(await h.status(ref)).toBe("succeeded");
 **Modify:** bounded readers/outputs in both provider packages and `sql-pages.ts`; `scripts/deployment-config.ts`, `scripts/deploy.ts`, `scripts/deploy.test.ts`, `README.md`.
 **Create:** `scripts/deployment-secrets.ts`, `docs/deployment-secrets.md`.
 
-- [ ] Use `TextEncoder().encode(value).byteLength` for UTF-8 limits. Keep tiny local helpers unless a real shared abstraction is needed. Bound response streams while reading; checking size after buffering an unbounded body is insufficient.
-- [ ] Enforce total page/output budgets across cursor calls; dispose cursors and release resources at exhaustion, timeout, and cancellation.
-- [ ] Add per-Worker secret contracts, including separate Snowflake read/write credentials when write authority is enabled. Existing read credentials may migrate only after their scope is checked.
-- [ ] Read secrets from operator-supplied secure sources, build one temporary file per target Worker outside the repo, restrict ACL/mode, use the actual installed Wrangler first-deploy secret-file option, and remove files in `finally`. Do not pass secrets through shell argument interpolation or combine provider credentials.
-- [ ] Dry-run mode uses contract validation without loading real secrets. Real bootstrap must fail before deployment when ACL restriction or contract completeness fails. Document manual cleanup after process termination.
+- [x] Use `TextEncoder().encode(value).byteLength` for UTF-8 limits. Keep tiny local helpers unless a real shared abstraction is needed. Bound response streams while reading; checking size after buffering an unbounded body is insufficient.
+- [x] Enforce total page/output budgets across cursor calls; dispose cursors and release resources at exhaustion, timeout, and cancellation.
+- [x] Add per-Worker secret contracts, including separate Snowflake read/write credentials when write authority is enabled. Existing read credentials may migrate only after their scope is checked.
+- [x] Read secrets from operator-supplied secure sources, build one temporary file per target Worker outside the repo, restrict ACL/mode, use the actual installed Wrangler first-deploy secret-file option, and remove files in `finally`. Do not pass secrets through shell argument interpolation or combine provider credentials.
+- [x] Dry-run mode uses contract validation without loading real secrets. Real bootstrap must fail before deployment when ACL restriction or contract completeness fails. Document manual cleanup after process termination.
 
 **Focused verification:** one Unicode output-boundary regression per distinct implementation path, plus one bootstrap isolation/failure-cleanup test in the existing deploy suite. No test per secret name.
 
