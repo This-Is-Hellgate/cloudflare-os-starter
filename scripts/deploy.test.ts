@@ -31,7 +31,7 @@ const validConfig: DeploymentConfig = {
     github: { enabled: false, workerName: null },
     confluence: { enabled: false, workerName: null },
     cloudflare: { enabled: false, workerName: null },
-    mcp: { enabled: false, workerName: null },
+    mcpv2: { enabled: false, workerName: null },
     mcpPortal: { enabled: false, workerName: null },
     snowflake: { enabled: false, workerName: null },
     huggingface: { enabled: false, workerName: null },
@@ -190,9 +190,9 @@ test("optional Gatekeepers are disabled by default and validate worker identitie
   );
   assert.throws(
     () => validateConfig(variant((c) => {
-      c.gatekeepers.mcp.workerName = "MCP-Worker";
+      c.gatekeepers.mcpv2.workerName = "MCP-Worker";
     })),
-    /Gatekeeper mcp\.workerName/i,
+    /Gatekeeper mcpv2\.workerName/i,
   );
   assert.throws(
     () => validateConfig(variant((c) => {
@@ -727,12 +727,13 @@ test("disabled optional Gatekeepers create no Worker, binding, or secret require
   }
 });
 
-test("rejects enabling a Gatekeeper the generator cannot wire", () => {
+test("rejects an unknown Gatekeeper id; every wired id can be enabled", () => {
+  // The catalog is the identity authority: an id outside it is refused, wired or not.
   assert.throws(
     () => validateConfig(variant((c) => {
-      c.gatekeepers.github = { enabled: true, workerName: "acme-github" };
+      (c.gatekeepers as Record<string, unknown>).neon = { enabled: true, workerName: "acme-neon" };
     })),
-    /cannot deploy it yet/i);
+    /Unknown optional Gatekeeper: neon/i);
 });
 
 test("builds each enabled optional Gatekeeper from its own package", () => {
@@ -780,6 +781,115 @@ test("keeps the loud fallback for a non-exe execpath and off Windows", () => {
 test("keeps the submodule's node-with-entry answer untouched", () => {
   const env = { npm_execpath: "C:/pnpm/pnpm.cjs" };
   assert.deepEqual(pnpmSpawnArgs(["test"], env, "win32"), [process.execPath, ["C:/pnpm/pnpm.cjs", "test"]]);
+});
+
+// ---------------------------------------------------------------------------
+// Task 2.1: the explicit service graph — data-driven catalog fixture
+
+const upstreamFixture: { id: OptionalGatekeeperId; enabled: boolean }[] = [
+  { id: "github", enabled: true },
+  { id: "confluence", enabled: true },
+  { id: "cloudflare", enabled: true },
+  { id: "mcpv2", enabled: true },
+  { id: "mcpPortal", enabled: true },
+];
+
+test("wires the upstream gatekeepers from their own package contracts", async () => {
+  const config = variant((c) => {
+    for (const { id } of upstreamFixture) {
+      c.gatekeepers[id] = { enabled: true, workerName: `acme-${id.toLowerCase()}` };
+    }
+    c.gatekeepers.mcpPortal.vars = { MCP_PORTAL_URL: "https://portal.example.com/mcp" };
+  });
+  const bases = await baseConfigs();
+  bases.gatekeepers = {};
+  for (const { id } of upstreamFixture) bases.gatekeepers[id] = await gatekeeperBase(id);
+  const generated = generateConfigs(config, bases);
+
+  // Each Worker is the operator's own identity; the PACKAGE's identity is preserved in the
+  // contracts that travel with it: compatibility flags, DO migrations, and rules.
+  const github = generated.gatekeepers!.github!;
+  assert.equal(github.name, "acme-github");
+  assert.deepEqual(github.compatibility_flags, ["allow_irrevocable_stub_storage", "nodejs_als"]);
+  assert.ok(JSON.stringify(github.migrations).includes("GitHubGatekeeperImpl"));
+  assert.ok(JSON.stringify(github.migrations).includes("UserAccount"));
+  const mcp = generated.gatekeepers!.mcpv2!;
+  // The SSRF boundary is the package's own flag and is never dropped by the generator.
+  assert.ok(mcp.compatibility_flags!.includes("global_fetch_strictly_public"));
+  const portal = generated.gatekeepers!.mcpPortal!;
+  assert.equal(portal.vars!.MCP_PORTAL_URL, "https://portal.example.com/mcp");
+  // Operator vars merge AFTER the base's own vars: MCP_ALLOW_INSECURE stays false by default.
+  assert.equal(portal.vars!.MCP_ALLOW_INSECURE, "false");
+
+  // Every enabled gatekeeper gets the Workshop vendor binding; the Router gets the public flow.
+  const workshopBindings = new Set(generated.workshop.services!.map((s) => s.binding));
+  assert.ok(workshopBindings.has("GATEKEEPER_GITHUB"));
+  assert.ok(workshopBindings.has("GATEKEEPER_MCPV2"));
+  const routerBindings = new Set(generated.router.services!.map((s) => s.binding));
+  assert.ok(routerBindings.has("GATEKEEPER_GITHUB"));
+  assert.ok(routerBindings.has("GATEKEEPER_MCPV2"));
+  // The portal's public OAuth/token surface is its own Worker; the Router route is /gatekeeper/mcpv2-style.
+  assert.ok(routerBindings.has("GATEKEEPER_MCP_PORTAL"));
+});
+
+test("exact secret ownership: each Worker carries only its own contract", async () => {
+  const config = variant((c) => {
+    for (const { id } of upstreamFixture) {
+      c.gatekeepers[id] = { enabled: true, workerName: `acme-${id.toLowerCase()}` };
+    }
+    c.gatekeepers.mcpPortal.vars = { MCP_PORTAL_URL: "https://portal.example.com/mcp" };
+  });
+  const bases = await baseConfigs();
+  bases.gatekeepers = {};
+  for (const { id } of upstreamFixture) bases.gatekeepers[id] = await gatekeeperBase(id);
+  const generated = generateConfigs(config, bases);
+
+  // OAuth providers need their OAuth App credentials; endpoint providers need none; the portal's
+  // token credential is conditional on MCP_PORTAL_AUTH=token and stays out of the hard contract.
+  assert.deepEqual(generated.gatekeepers!.github!.secrets!.required, ["CLIENT_ID", "CLIENT_SECRET"]);
+  assert.deepEqual(generated.gatekeepers!.confluence!.secrets!.required, ["CLIENT_ID", "CLIENT_SECRET"]);
+  assert.deepEqual(generated.gatekeepers!.cloudflare!.secrets!.required, ["CLIENT_ID", "CLIENT_SECRET"]);
+  assert.deepEqual(generated.gatekeepers!.mcpv2!.secrets!.required, []);
+  assert.deepEqual(generated.gatekeepers!.mcpPortal!.secrets!.required, []);
+});
+
+test("service-only packages get no Router binding (publicFlow: false)", async () => {
+  // The catalog override makes the fixture deterministic: a synthetic service-only entry proves
+  // the generator honors publicFlow without depending on a real future package.
+  const catalog = structuredClone(OPTIONAL_GATEKEEPER_CATALOG);
+  catalog.github = { ...catalog.github, publicFlow: false };
+  const config = variant((c) => {
+    c.gatekeepers.github = { enabled: true, workerName: "acme-github" };
+    c.gatekeepers.snowflake = { enabled: true, workerName: "acme-snowflake" };
+  });
+  const bases = await baseConfigs();
+  bases.gatekeepers = {
+    github: await gatekeeperBase("github"),
+    snowflake: await gatekeeperBase("snowflake"),
+  };
+  const generated = generateConfigs(config, bases, catalog);
+
+  const routerBindings = new Set(generated.router.services!.map((s) => s.binding));
+  // Service-only: Workshop vendor RPC binding exists, Router flow does not.
+  assert.ok(generated.workshop.services!.some((s) => s.binding === "GATEKEEPER_GITHUB"));
+  assert.equal(routerBindings.has("GATEKEEPER_GITHUB"), false);
+  // The public-flow entry still routes normally.
+  assert.ok(routerBindings.has("GATEKEEPER_SNOWFLAKE"));
+});
+
+test("an enabled portal without its required configuration fails validation loudly", () => {
+  assert.throws(
+    () => validateConfig(variant((c) => {
+      c.gatekeepers.mcpPortal = { enabled: true, workerName: "acme-portal" };
+    })),
+    /MCP_PORTAL_URL is required configuration/);
+  // Supplying it passes.
+  assert.doesNotThrow(() => validateConfig(variant((c) => {
+    c.gatekeepers.mcpPortal = {
+      enabled: true, workerName: "acme-portal",
+      vars: { MCP_PORTAL_URL: "https://portal.example.com/mcp" },
+    };
+  })));
 });
 
 // ---------------------------------------------------------------------------

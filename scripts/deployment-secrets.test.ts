@@ -73,7 +73,7 @@ test("contract derivation covers enabled gatekeepers and the conditional Worksho
       github: { enabled: false, workerName: null },
       confluence: { enabled: false, workerName: null },
       cloudflare: { enabled: false, workerName: null },
-      mcp: { enabled: false, workerName: null },
+      mcpv2: { enabled: false, workerName: null },
       mcpPortal: { enabled: false, workerName: null },
       snowflake: { enabled: true, workerName: "gatekeeper-snowflake" },
       huggingface: { enabled: true, workerName: "gatekeeper-huggingface" },

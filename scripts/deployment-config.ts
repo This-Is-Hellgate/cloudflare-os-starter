@@ -21,7 +21,7 @@ export type OptionalGatekeeperId =
   | "github"
   | "confluence"
   | "cloudflare"
-  | "mcp"
+  | "mcpv2"
   | "mcpPortal"
   | "snowflake"
   | "huggingface";
@@ -36,6 +36,19 @@ export interface GatekeeperCatalogEntry {
   routePrefix: `/gatekeeper/${string}`;
   /** Credential/configuration shape; secrets are supplied separately at deploy time. */
   auth: "oauth2" | "endpoint" | "portal" | "snowflake" | "huggingface";
+  /**
+   * Whether the Router exposes an HTTP flow for this Gatekeeper (the `/gatekeeper/*` prefix,
+   * OAuth redirects, frontend assets). `false` marks a SERVICE-ONLY package: the Workshop binds
+   * it, the Router never discovers it. Future control/runtime/factory Workers carry
+   * `publicFlow: false` — no new Router prefix, no route, no public surface.
+   */
+  publicFlow: boolean;
+  /** The Vendor entrypoint the Workshop's service binding targets. */
+  entrypoint: string;
+  /** Wrangler secrets the Worker requires before it will deploy (installed per Worker at deploy time). */
+  secrets: readonly string[];
+  /** Deployment configuration variables the operator MUST supply when the Gatekeeper is enabled. */
+  requiredVars?: readonly string[];
 }
 
 /**
@@ -50,42 +63,73 @@ export const OPTIONAL_GATEKEEPER_CATALOG: Record<OptionalGatekeeperId, Gatekeepe
     binding: "GATEKEEPER_GITHUB",
     routePrefix: "/gatekeeper/github",
     auth: "oauth2",
+    publicFlow: true,
+    entrypoint: "GatekeeperVendor",
+    // From the package's own deploy-inputs.json: an OAuth App's client id and secret.
+    secrets: ["CLIENT_ID", "CLIENT_SECRET"],
   },
   confluence: {
     packageDir: "cloudflare-os/packages/gatekeeper-confluence",
     binding: "GATEKEEPER_CONFLUENCE",
     routePrefix: "/gatekeeper/confluence",
     auth: "oauth2",
+    publicFlow: true,
+    entrypoint: "GatekeeperVendor",
+    // Same OAuth App shape as GitHub; the package reports NOT_CONFIGURED without them.
+    secrets: ["CLIENT_ID", "CLIENT_SECRET"],
   },
   cloudflare: {
     packageDir: "cloudflare-os/packages/gatekeeper-cloudflare",
     binding: "GATEKEEPER_CLOUDFLARE",
     routePrefix: "/gatekeeper/cloudflare",
     auth: "oauth2",
+    publicFlow: true,
+    entrypoint: "GatekeeperVendor",
+    secrets: ["CLIENT_ID", "CLIENT_SECRET"],
+    // Telemetry/billing observation ONLY: this Worker never carries infrastructure control.
   },
-  mcp: {
+  // Deployed under the mcpv2 identity (Cloudflare's refreshed MCP platform naming); the upstream
+  // package directory keeps its own name.
+  mcpv2: {
     packageDir: "cloudflare-os/packages/gatekeeper-mcp",
-    binding: "GATEKEEPER_MCP",
-    routePrefix: "/gatekeeper/mcp",
+    binding: "GATEKEEPER_MCPV2",
+    routePrefix: "/gatekeeper/mcpv2",
     auth: "endpoint",
+    publicFlow: true,
+    entrypoint: "GatekeeperVendor",
+    // Endpoints are user-supplied; no credentials. `global_fetch_strictly_public` (preserved from
+    // the package's own wrangler.jsonc) is the SSRF boundary.
+    secrets: [],
   },
   mcpPortal: {
     packageDir: "cloudflare-os/packages/gatekeeper-mcp-portal",
     binding: "GATEKEEPER_MCP_PORTAL",
     routePrefix: "/gatekeeper/mcp-portal",
     auth: "portal",
+    publicFlow: true,
+    entrypoint: "GatekeeperVendor",
+    // MCP_PORTAL_TOKEN is only required when the operator sets MCP_PORTAL_AUTH=token (documented;
+    // the contract stays empty so token-less portal deployments are not blocked).
+    secrets: [],
+    requiredVars: ["MCP_PORTAL_URL"],
   },
   snowflake: {
     packageDir: "packages/gatekeeper-snowflake",
     binding: "GATEKEEPER_SNOWFLAKE",
     routePrefix: "/gatekeeper/snowflake",
     auth: "snowflake",
+    publicFlow: true,
+    entrypoint: "GatekeeperVendor",
+    secrets: ["SNOWFLAKE_ACCOUNT", "SNOWFLAKE_TOKEN", "SNOWFLAKE_ROLE"],
   },
   huggingface: {
     packageDir: "packages/gatekeeper-huggingface",
     binding: "GATEKEEPER_HUGGINGFACE",
     routePrefix: "/gatekeeper/huggingface",
     auth: "huggingface",
+    publicFlow: true,
+    entrypoint: "GatekeeperVendor",
+    secrets: ["HF_TOKEN"],
   },
 };
 
@@ -95,6 +139,13 @@ export interface OptionalGatekeeperConfig {
   enabled: boolean;
   /** Required only when enabled; the name is a permanent Cloudflare Worker identity. */
   workerName: string | null;
+  /**
+   * Operator configuration variables merged into the generated Worker's `vars`. Values here are
+   * OPERATOR policy: the endpoint a portal serves, whether portal trust annotations drive
+   * auto-approval, the local-development insecure-fetch flag. The model never supplies them.
+   * Catalog entries may require specific keys (`requiredVars`).
+   */
+  vars?: Record<string, string>;
 }
 
 /** Every provider {@link AiGatewayProvider} allows, for validation and for error messages. */
@@ -102,25 +153,29 @@ export const AI_GATEWAY_PROVIDERS: readonly AiGatewayProvider[] =
   ["anthropic", "openai", "google", "cloudflare"];
 
 /**
- * The optional Gatekeepers the deployment generator can already emit: the outer packages whose
- * Worker config, bindings, and secret contract have passed their security review (see
- * SECURITY-REVIEW.md in packages/gatekeeper-snowflake and packages/gatekeeper-huggingface). The
- * remaining catalog entries are upstream packages whose wiring (OAuth flows, per-user connections)
- * is a later change; enabling one in `deployment.jsonc` is rejected loudly rather than half-wired.
+ * The optional Gatekeepers the deployment generator can emit. Each entry is wired from its own
+ * package contract: the package's wrangler.jsonc (bindings, DO migrations, compatibility flags,
+ * rules) is the base the generator customizes, and the catalog carries the identity, flow,
+ * entrypoint, and secret contract. Every outer addition must land with its SECURITY-REVIEW.md
+ * before it joins this list; anything enabled but unwired is still rejected loudly rather than
+ * half-wired.
  */
-export const WIRED_GATEKEEPERS: readonly OptionalGatekeeperId[] = ["snowflake", "huggingface"];
+export const WIRED_GATEKEEPERS: readonly OptionalGatekeeperId[] = [
+  "github", "confluence", "cloudflare", "mcpv2", "mcpPortal", "snowflake", "huggingface",
+];
 
 /**
  * Wrangler secrets each wired Gatekeeper requires before it will deploy. These make the generated
- * `secrets.required` list; wrangler refuses the deploy until they are installed with
- * `wrangler secret put`. Everything beyond these (allowlists, limits, operator gates) is optional
- * and documented in the package's SECURITY-REVIEW.md; each Gatekeeper fails closed without its
- * required secrets, so a half-configured Worker is inert rather than unsafe.
+ * `secrets.required` list; wrangler refuses the deploy until they are installed. Derived from the
+ * catalog — {@link OPTIONAL_GATEKEEPER_CATALOG} is the single source of truth. Everything beyond
+ * these (allowlists, limits, operator gates) is optional and documented in the package's
+ * SECURITY-REVIEW.md; each Gatekeeper fails closed without its required secrets, so a
+ * half-configured Worker is inert rather than unsafe.
  */
-export const GATEKEEPER_REQUIRED_SECRETS: Partial<Record<OptionalGatekeeperId, readonly string[]>> = {
-  snowflake: ["SNOWFLAKE_ACCOUNT", "SNOWFLAKE_TOKEN", "SNOWFLAKE_ROLE"],
-  huggingface: ["HF_TOKEN"],
-};
+export const GATEKEEPER_REQUIRED_SECRETS: Partial<Record<OptionalGatekeeperId, readonly string[]>> = Object.fromEntries(
+  (Object.entries(OPTIONAL_GATEKEEPER_CATALOG) as [OptionalGatekeeperId, GatekeeperCatalogEntry][])
+    .map(([id, entry]) => [id, entry.secrets]),
+)
 
 /**
  * The public address of the router Worker. Exactly one field is set; `validateConfig` enforces

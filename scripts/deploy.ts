@@ -17,7 +17,7 @@ import type {
   ProdWranglerConfig,
   RouterRoute,
 } from "./deployment-config.ts";
-import { OPTIONAL_GATEKEEPER_CATALOG } from "./deployment-config.ts";
+import { OPTIONAL_GATEKEEPER_CATALOG, type GatekeeperCatalogEntry } from "./deployment-config.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // One deployment per checkout; use separate worktrees for concurrent deploys.
@@ -251,6 +251,15 @@ export function validateConfig(config: DeploymentConfig): DeploymentConfig {
         `bindings, and secret contract are not wired into the deployment generator. Leave it ` +
         `disabled until its wiring lands.`);
     }
+    const catalogEntry = OPTIONAL_GATEKEEPER_CATALOG[id as OptionalGatekeeperId];
+    for (const varName of catalogEntry.requiredVars ?? []) {
+      const value = gatekeeper.vars?.[varName];
+      if (value === undefined || value.trim() === "") {
+        throw new Error(
+          "Gatekeeper " + id + " is enabled but " + varName + " is required configuration " +
+          "(set it under gatekeepers." + id + ".vars). The operator supplies it; the model never does.");
+      }
+    }
   }
 
   const route = config.workers.router.route;
@@ -458,7 +467,11 @@ function setCommon(
   };
 }
 
-export function generateConfigs(config: DeploymentConfig, bases: BaseConfigs): GeneratedConfigs {
+export function generateConfigs(
+  config: DeploymentConfig,
+  bases: BaseConfigs,
+  catalog: Record<OptionalGatekeeperId, GatekeeperCatalogEntry> = OPTIONAL_GATEKEEPER_CATALOG,
+): GeneratedConfigs {
   validateConfig(config);
   const router = structuredClone(bases.router);
   const workshop = structuredClone(bases.workshop);
@@ -612,12 +625,24 @@ export function generateConfigs(config: DeploymentConfig, bases: BaseConfigs): G
     if (requiredSecrets) {
       generatedGatekeeper.secrets = { required: [...requiredSecrets] };
     }
+    // Operator configuration variables (MCP_PORTAL_URL, portal trust annotations, the local-dev
+    // insecure-fetch flag): merged AFTER the base's own vars so deployment policy wins. The model
+    // never supplies these.
+    if (gatekeeper.vars && Object.keys(gatekeeper.vars).length) {
+      generatedGatekeeper.vars = { ...generatedGatekeeper.vars, ...gatekeeper.vars };
+    }
     gatekeepers[id] = generatedGatekeeper;
-    router.services!.push({ binding: OPTIONAL_GATEKEEPER_CATALOG[id].binding, service: gatekeeper.workerName });
+    const entry = catalog[id];
+    // publicFlow decides the Router HTTP flow ONLY. The Workshop service binding exists either
+    // way: a service-only package (publicFlow: false) is reachable over vendor RPC, never by a
+    // public route — the Router does not discover it at all.
+    if (entry.publicFlow) {
+      router.services!.push({ binding: entry.binding, service: gatekeeper.workerName });
+    }
     workshop.services!.push({
-      binding: OPTIONAL_GATEKEEPER_CATALOG[id].binding,
+      binding: entry.binding,
       service: gatekeeper.workerName,
-      entrypoint: "GatekeeperVendor",
+      entrypoint: entry.entrypoint,
     });
   }
 

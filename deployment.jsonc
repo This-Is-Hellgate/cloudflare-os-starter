@@ -42,7 +42,7 @@
     "github": { "enabled": false, "workerName": null },
     "confluence": { "enabled": false, "workerName": null },
     "cloudflare": { "enabled": false, "workerName": null },
-    "mcp": { "enabled": false, "workerName": null },
+    "mcpv2": { "enabled": false, "workerName": null },
     "mcpPortal": { "enabled": false, "workerName": null },
     "snowflake": { "enabled": true, "workerName": "hellgate-os-gatekeeper-snowflake" },
     "huggingface": { "enabled": false, "workerName": null }
