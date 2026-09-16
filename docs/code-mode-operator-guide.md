@@ -56,6 +56,37 @@ env):
   `types-code.ts` declares; anything else fails RPC shape validation before it is stored. The
   `types-code.ts`/`types.d.ts` hand-sync is enforced by each package's test suite.
 
+## Multi-gadget workspaces
+
+A workspace is no longer one gadget: it contains numbered **workpieces** (gadgets and gatekeeper
+connections in one shared ID namespace; upstream plan `cloudflare-os/plans/multi-gadget.md`).
+
+- Workspaces can start empty; agents create gadgets explicitly with the `createGadget` tool
+  (creation is crash-safe and provisional to the chat that made it).
+- **Bindings are per-gadget edges.** Two gadgets can bind the same gatekeeper connection, each
+  annotating it differently for blueprint consumers. Binding names live on the gadget's binding
+  map, not on the gatekeeper record.
+- **Approval policy is workspace-wide per gatekeeper.** Approving an action kind approves it no
+  matter which gadget invoked it; actions and hooks identify the gatekeeper, not a binding name.
+- Removing a connection in the UI unbinds it from one gadget; the gatekeeper record survives
+  (orphaned connections are surfaced for cleanup).
+- Agent file tools take a `workpieceId`; absent references resolve to the workspace's
+  `defaultGadgetId` (never reassigned — a deleted gadget fails references explicitly).
+
+## Step transactionality
+
+A model **step** (one model request plus its tool batch; upstream plan
+`cloudflare-os/plans/step-transactionality.md`) commits atomically: the step's tool-call transcript
+record and every content effect it produced land in **one storage transaction** at the step
+barrier. Consequences for the governed loop:
+
+- A crash mid-step leaves no half-applied content the transcript cannot account for — replay sees
+  all-or-nothing.
+- `executeCode` after buffered edits in the same step throws a retryable, agent-visible error
+  ("changes land next step — retry") instead of running provisional code.
+- **Gatekeeper effects are explicitly out of step-rollback scope**: our Stage proposals still
+  require the real approval flow before any vendor effect, which is the stronger guarantee.
+
 ## Model routing (pi layer)
 
 All inference is HTTPS-with-tokens: the deployment's AI Gateway route uses
