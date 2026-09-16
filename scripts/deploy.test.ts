@@ -619,7 +619,7 @@ test("never lets a deploy replay a cached build artifact", () => {
   assert.ok(commands.length > 0, "expected at least one build command");
   for (const { args } of commands) {
     const command = args.join(" ");
-    // `pnpm --filter <pkg> build` cannot see a Vite+ task, and two of the three submodule targets
+    // `pnpm --filter <pkg> build` cannot see a Vite+ task, and two of the three kernel targets
     // are now tasks rather than scripts. `vp run` runs both.
     assert.ok(command.includes("vp run"),
       `build step does not go through vp run: ${command}`);
@@ -767,7 +767,7 @@ test("spawns the standalone pnpm.exe directly when npm_execpath is a Windows bin
 });
 
 test("keeps the loud fallback for a non-exe execpath and off Windows", () => {
-  // A .js execpath must not be spawned as an executable: the submodule deliberately leaves this
+  // A .js execpath must not be spawned as an executable: the kernel deliberately leaves this
   // as bare "pnpm" (ENOENT) rather than risk running npm against a pnpm workspace.
   const jsEnv = { npm_execpath: "C:/npm/npm-cli.js" };
   assert.deepEqual(pnpmSpawnArgs(["test"], jsEnv, "win32"), ["pnpm", ["test"]]);
@@ -775,12 +775,12 @@ test("keeps the loud fallback for a non-exe execpath and off Windows", () => {
   // Missing execpath: same fallback.
   assert.deepEqual(pnpmSpawnArgs(["test"], {}, "win32"), ["pnpm", ["test"]]);
 
-  // Off Windows the submodule's answer is used as-is, even with an .exe execpath.
+  // Off Windows the kernel's answer is used as-is, even with an .exe execpath.
   const exeEnv = { npm_execpath: process.execPath };
   assert.deepEqual(pnpmSpawnArgs(["test"], exeEnv, "linux"), ["pnpm", ["test"]]);
 });
 
-test("keeps the submodule's node-with-entry answer untouched", () => {
+test("keeps the kernel's node-with-entry answer untouched", () => {
   const env = { npm_execpath: "C:/pnpm/pnpm.cjs" };
   assert.deepEqual(pnpmSpawnArgs(["test"], env, "win32"), [process.execPath, ["C:/pnpm/pnpm.cjs", "test"]]);
 });

@@ -16,7 +16,7 @@
     "types": ["node"],
     "erasableSyntaxOnly": true,
     "verbatimModuleSyntax": true,
-    // The root sets allowJs; nothing under scripts/ is JS, and checking the submodule's is not this
+    // The root sets allowJs; nothing under scripts/ is JS, and checking the kernel's is not this
     // config's job.
     "checkJs": false
   },

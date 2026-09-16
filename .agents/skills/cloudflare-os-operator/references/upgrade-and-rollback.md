@@ -4,15 +4,15 @@ Read the current checkout and current Cloudflare documentation before using this
 
 ## Upgrade Gate
 
-Never advance the `cloudflare-os` submodule to a moving branch or an assumed latest release.
+The scheduled sync workflow merges upstream main automatically when the release checks pass, and opens a review PR when they fail. A manual or PR-based upgrade must meet the same standard — never adopt an upstream change past failing checks, and never by editing the pin file by hand.
 
-1. Record the current parent commit and full submodule gitlink.
-2. Select an explicit full target commit from an approved source.
+1. Record the current parent commit and the recorded pin (`scripts/upstream-pin.json`).
+2. Select an explicit full target commit from upstream (the sync PR names it).
 3. Prove the target commit's provenance and review release history plus the complete old-to-new diff.
-4. Keep the parent and submodule worktrees clean except for the intentional gitlink/wrapper compatibility changes.
-5. Retain the old gitlink, configs, Worker deployment IDs, resource identities, and compatibility notes.
+4. Keep the worktree clean except for the intentional sync/wrapper compatibility changes.
+5. Retain the old pin, configs, Worker deployment IDs, resource identities, and compatibility notes.
 
-If using a mirror, prove the exact commit exists without changing the active checkout first. Use a temporary clone or fetch the exact full SHA from the approved mirror where supported, inspect the commit object, and compare it to the intended source. Do not alter `.gitmodules` or check out a nearby branch head as a test.
+If using a mirror, prove the exact commit exists without changing the active checkout first. Use a temporary clone or fetch the exact full SHA from the approved mirror where supported, inspect the commit object, and compare it to the intended source. Do not rewrite `scripts/upstream-pin.json` or check out a nearby branch head as a test.
 
 ## Compatibility Review
 
@@ -26,16 +26,16 @@ Audit the old-to-new change for:
 - AI transport, providers, billing, and logging.
 - Error reporting and frontend reporting.
 - Dependencies, lockfiles, build commands, and generated artifacts.
-- The submodule's `pnpm-workspace.yaml` `catalog:` block, and its build scripts vs Vite+ tasks.
+- The kernel's `pnpm-workspace.yaml` `catalog:` block, and its build scripts vs Vite+ tasks.
 
 Inspect every base-config section that `scripts/deploy.ts` replaces or reconstructs. New upstream fields can otherwise be silently dropped. Generate and review sanitized old/new derived-config diffs, but never commit or hand-edit generated Wrangler files.
 
 Two of those deserve their own step, because both fail quietly:
 
-- **Catalog drift.** `cloudflare-os/packages/workshop-shared` and `.../error-reporting` are members of the *starter's* workspace, so their `catalog:` specifiers resolve against the starter's `pnpm-workspace.yaml`, not the submodule's. A missing entry fails `pnpm install` loudly. A stale one does not: it resolves a second copy of `capnweb`, and a stub minted by one copy is unserialisable by the other's session. A deduped dev machine hides that; the two separate installs in CI do not. Re-sync the catalog with the submodule's as part of the gitlink change.
+- **Catalog drift.** `cloudflare-os/packages/workshop-shared` and `.../error-reporting` are members of the *starter's* workspace, so their `catalog:` specifiers resolve against the starter's `pnpm-workspace.yaml`, not the kernel's. A missing entry fails `pnpm install` loudly. A stale one does not: it resolves a second copy of `capnweb`, and a stub minted by one copy is unserialisable by the other's session. A deduped dev machine hides that; the two separate installs in CI do not. Run `node scripts/catalog-sync.ts` to re-sync the catalog with the kernel's; `pnpm check:boundary` fails while drift remains.
 - **Build scripts becoming Vite+ tasks.** `scripts/deploy.ts` reaches every build through `vp run --no-cache <task>`, which runs scripts and tasks alike, because `pnpm --filter` cannot see a task. If an upstream package converts its `build` script to a task, or its `build` script starts spawning a nested cached `vp run` of its own, check that `buildCommands()` still rebuilds from source rather than replaying an archived artifact. `scripts/deploy.test.ts` asserts the flag but cannot see a nested invocation.
 
-Update only the gitlink unless a specific reviewed wrapper compatibility change is required. Install both workspaces and run `pnpm lint`, `pnpm check`, plus the relevant upstream tests and type checks.
+Update only the vendored kernel (through the sync workflow or a `git subtree pull`) unless a specific reviewed wrapper compatibility change is required. Install both workspaces and run `pnpm lint`, `pnpm check`, plus the relevant upstream tests and type checks.
 
 ## Migration Plan
 
@@ -93,7 +93,7 @@ validation evidence:
 
 Worker version rollback does not restore Access policies, DNS, bindings, secrets, provisioned resources, KV/R2 data, or all Durable Object changes.
 
-- Prefer restoring the complete known-good wrapper configuration and pinned submodule, then redeploying a compatible stack when contracts or bindings changed.
+- Prefer restoring the complete known-good wrapper configuration and recorded upstream pin (revert of the sync commit), then redeploying a compatible stack when contracts or bindings changed.
 - Use targeted Worker version rollback only when code and current bindings/storage remain compatible.
 - Never delete or downgrade storage as an automatic rollback step.
 - A partially completed first deployment needs safe completion or separately approved teardown, not a fictional rollback.

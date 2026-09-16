@@ -1,10 +1,10 @@
 // The two shapes `deploy.ts` sits between: `deployment.jsonc` on the way in, and the
 // `wrangler.prod.jsonc` files it generates on the way out.
 //
-// The wrangler side reuses the submodule's own declarations rather than redeclaring them, so a
+// The wrangler side reuses the kernel's own declarations rather than redeclaring them, so a
 // base-config change upstream surfaces here as a type error during `pnpm types:scripts` instead of
 // as a silently dropped key at deploy time. The imports are type-only, which under
-// `verbatimModuleSyntax` erase completely -- `node` never resolves them, so the submodule's
+// `verbatimModuleSyntax` erase completely -- `node` never resolves them, so the kernel's
 // runtime dependencies are not this script's problem.
 
 import type {

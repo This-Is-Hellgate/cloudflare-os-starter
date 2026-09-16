@@ -1,6 +1,6 @@
 ---
 name: cloudflare-os-operator
-description: Guides cloudflare/cloudflare-os-starter setup, Cloudflare Access, deployment.jsonc, storage, AI, observability, custom Gatekeepers, deployment, verification, troubleshooting, rollback, and pinned-submodule upgrades. Use only for deployments created from the Cloudflare OS Deployment Starter, not standalone Cloudflare OS checkouts.
+description: Guides cloudflare/cloudflare-os-starter setup, Cloudflare Access, deployment.jsonc, storage, AI, observability, custom Gatekeepers, deployment, verification, troubleshooting, rollback, and upstream syncs of the vendored kernel. Use only for deployments created from the Cloudflare OS Deployment Starter, not standalone Cloudflare OS checkouts.
 compatibility: Requires Git, the checkout-declared Node.js and pnpm versions, project-pinned Wrangler, and a Cloudflare account with the products used by the deployment.
 ---
 
@@ -8,7 +8,7 @@ compatibility: Requires Git, the checkout-declared Node.js and pnpm versions, pr
 
 Own the outcome, not just the next command. Guide the operator from an unprepared checkout to a verified deployment, or from a failure to a diagnosed and safe recovery. A provider outage, unavailable product, or incorrect external policy can never be ruled out in advance, so do not promise an issue-free deployment. Prevent avoidable failures and do not call the work complete without evidence.
 
-This skill operates the deployment wrapper, not Cloudflare OS in isolation. The wrapper pins Cloudflare OS as a submodule, derives temporary Wrangler configs, and coordinates several Workers.
+This skill operates the deployment wrapper, not Cloudflare OS in isolation. The wrapper vendors Cloudflare OS in the tracked `cloudflare-os/` directory (kept in sync with upstream by a scheduled workflow), derives temporary Wrangler configs, and coordinates several Workers.
 
 ## Locate The Starter
 
@@ -21,7 +21,7 @@ Find the repository root containing all of these markers:
 
 Do not assume the current working directory or this skill's directory is the starter root. If the markers are absent, stop and ask for the starter checkout. Do not apply this workflow directly to a standalone Cloudflare OS checkout.
 
-Once the submodule is initialized, confirm `cloudflare-os/packages/router/` exists as well. The deploy binds and deploys it, so a pinned commit without it cannot be deployed by this wrapper; treat its absence as a provenance problem, not a missing build step.
+Confirm `cloudflare-os/packages/router/` exists. The deploy binds and deploys it, so a kernel directory without it cannot be deployed by this wrapper; treat its absence as a provenance problem, not a missing build step.
 
 ## Read Current Sources First
 
@@ -31,17 +31,16 @@ Before any mutation, always read the current checkout's:
 2. `deployment.jsonc`
 3. `scripts/deploy.ts`
 4. `package.json`
-5. `.gitmodules`
+5. `scripts/upstream-pin.json`
 6. Available relevant upstream files under `cloudflare-os/`
 
-Load `docs/customization.md`, `docs/observability.md`, package guides, and reference files from this skill only when their subject is relevant. If the submodule is unavailable, inspect all available wrapper sources and defer upstream-dependent advice until provenance is resolved.
+Load `docs/customization.md`, `docs/observability.md`, package guides, and reference files from this skill only when their subject is relevant. If the kernel directory is unavailable, inspect all available wrapper sources and defer upstream-dependent advice until provenance is resolved.
 
 Inspect the deploy script rather than assuming its validation, generated paths, build steps, or deployment order. Consult current Cloudflare documentation before relying on product behavior, permissions, CLI syntax, limits, or rollback support. Repository code is authoritative for what this checkout does; current Cloudflare documentation is authoritative for the platform it calls. Surface conflicts instead of silently choosing one.
 
 Expected baseline commands are:
 
 ```sh
-git submodule update --init
 pnpm install
 pnpm --dir cloudflare-os install
 pnpm exec wrangler login
@@ -62,7 +61,7 @@ Confirm them against the checkout before running them. Always use `pnpm`, never 
 - Run only one `pnpm check` or `pnpm deploy` per checkout at a time. Use separate worktrees for concurrency.
 - Change one root cause at a time. Re-run the narrow check, then the complete check.
 - Do not broaden permissions, disable security controls, recreate resources, or retry deployments blindly to make an error disappear.
-- Keep a sanitized operation record: root commit, submodule commit, target account, intended route, Worker names, resource identities, deployment/version IDs, decisions, verification, and rollback limits.
+- Keep a sanitized operation record: root commit, recorded upstream pin (`scripts/upstream-pin.json`), target account, intended route, Worker names, resource identities, deployment/version IDs, decisions, verification, and rollback limits.
 
 ## Classify The Operation
 
@@ -109,7 +108,7 @@ Show the authority before and after, affected users/data, cost and privacy impli
 Do not run `pnpm deploy`, install or delete secrets, modify Access/DNS, adopt resources, or roll back production until the operator approves a mutation summary containing:
 
 - Exact account ID and hostname.
-- Root and submodule commits.
+- Root commit and recorded upstream pin.
 - Every Worker to create or update.
 - Every resource to provision or adopt.
 - Access application and administrator policy.
@@ -129,9 +128,7 @@ Record, without leaking credentials:
 operation mode and first/continuation/replacement:
 root commit and branch:
 root worktree changes:
-configured submodule URL:
-expected submodule gitlink:
-checked-out submodule commit and status:
+recorded upstream pin (`scripts/upstream-pin.json`) and boundary-check result:
 Node, pnpm, and Wrangler versions:
 Wrangler authentication source and target account:
 route, hostname, and resolved public origin:
@@ -143,13 +140,13 @@ custom Gatekeeper provenance and intended policy:
 last-known-good deployment/version IDs:
 ```
 
-Inspect `.gitmodules` before initializing. If its URL is private or inaccessible, do not request SSH credentials, accept an unknown host key, rewrite the URL, or substitute a branch head. Offer these choices:
+Run `pnpm check:boundary` to verify the vendored kernel against the recorded upstream pin. If the pin's commit object is not local, the check fetches it from the official upstream; do not substitute a mirror without approval, and do not rewrite the pin file by hand to make a failing check pass. Offer these choices when provenance is in doubt:
 
-1. Use an already-authorized source.
-2. Use a public mirror only after proving the exact pinned commit exists there and receiving approval for the provenance change.
+1. Use the recorded pin as-is (the normal case; the sync workflow maintains it).
+2. Re-verify the exact pinned commit against the official upstream before deploying.
 3. Stop.
 
-The checked-out submodule commit must equal the parent gitlink. Never use `git submodule update --remote` or an unreviewed "latest" commit.
+The vendored `cloudflare-os/` tree must equal the recorded pin's tree — `pnpm check:boundary` proves this byte-for-byte. Never adopt an unreviewed "latest" upstream commit by editing the pin file manually; let the sync workflow (or a review PR) carry upstream changes.
 
 Check whether a `CLOUDFLARE_API_TOKEN` environment variable is present without printing it; it may override an expected Wrangler profile. Use sanitized `pnpm exec wrangler whoami` output to prove the account matches `deployment.jsonc.accountId` before mutation. Never run a command that prints the active authentication token.
 
@@ -174,7 +171,7 @@ Default recommendations for a first evaluation are the default AI configuration 
 
 Require Node.js major 24 and pnpm major 11 unless the current repository says otherwise. Confirm account access to every enabled product, including Workers, KV, R2, Browser Rendering, and Dynamic Worker Loaders. Workers AI and AI Gateway belong on that list unless the operator has deliberately disabled the model catalog, since it is enabled by default. Artifacts is optional.
 
-Run the repository's documented setup commands. Stop if installation unexpectedly changes lockfiles, the submodule gitlink, or tracked files. Resolve provenance or version drift; do not normalize it away.
+Run the repository's documented setup commands. Stop if installation unexpectedly changes lockfiles, the recorded upstream pin, or tracked files. Resolve provenance or version drift; do not normalize it away.
 
 Temporary `wrangler.prod.jsonc` files are generated implementation details. Never edit, commit, or deploy them directly. If one remains after interruption, first prove that no check/deploy process is active, preserve the original failure, and then remove only the stale generated file.
 
@@ -330,7 +327,7 @@ Give the operator a concise report:
 ```text
 Outcome: verified / partially verified / failed safely
 Account and route:
-Root/submodule commits:
+Root commit and recorded upstream pin:
 Workers changed and deployment IDs:
 Resources provisioned or adopted:
 Access positive/negative evidence:
@@ -363,6 +360,6 @@ After two identical failed attempts, stop and escalate with sanitized evidence. 
 
 Rollback is a coordinated system operation, not one command. Read [references/upgrade-and-rollback.md](references/upgrade-and-rollback.md), produce the per-Worker rollback matrix, require approval, and repeat the full live verification. Never delete or downgrade storage as an automatic rollback step.
 
-## Pinned Submodule Upgrade
+## Upstream Sync Review
 
-Never advance the submodule blindly. Read and follow [references/upgrade-and-rollback.md](references/upgrade-and-rollback.md). An evaluation worktree prevents local file races but is not staging isolation; use separate Worker identities, route, storage, bindings, and data. Stop for specialist review before any migration, deleted/renamed Durable Object class, irreversible data change, auth boundary change, or incompatible RPC change.
+The scheduled sync workflow merges upstream automatically when checks pass; when they fail it opens a review PR — treat that PR as the upgrade review. Read and follow [references/upgrade-and-rollback.md](references/upgrade-and-rollback.md). An evaluation worktree prevents local file races but is not staging isolation; use separate Worker identities, route, storage, bindings, and data. Stop for specialist review before any migration, deleted/renamed Durable Object class, irreversible data change, auth boundary change, or incompatible RPC change.

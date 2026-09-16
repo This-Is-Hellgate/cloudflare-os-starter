@@ -7,7 +7,7 @@ Use this reference only after reading the current checkout. Commands, validation
 Collect the smallest useful, sanitized evidence:
 
 - Exact failing command and first error.
-- Root commit, submodule gitlink, and checked-out submodule commit.
+- Root commit, recorded upstream pin (`scripts/upstream-pin.json`), and the boundary-check result.
 - Whether the worktree changed before or during the failure.
 - Node, pnpm, project-pinned Wrangler versions.
 - Boolean presence of `CLOUDFLARE_API_TOKEN`, never its value.
@@ -22,7 +22,7 @@ Do not paste full production configs or logs by default. Never run a command tha
 
 ```text
 Failure
-|- Before submodule checkout: provenance or source access
+|- Before checkout: provenance or source access
 |- During install/build/test: local setup or compatibility
 |- During generated-config validation: deployment.jsonc
 |- During Wrangler dry-run: generated configuration, build output, or local validation
@@ -35,18 +35,16 @@ Failure
 `- Reports/logs are absent: signal semantics, sampling, time range, or binding
 ```
 
-## Submodule And Provenance
+## Kernel Provenance
 
 | Symptom | Check | Safe response |
 | --- | --- | --- |
-| `cloudflare-os/package.json` is absent | `git submodule status`, parent gitlink, `.gitmodules` | Initialize only from the reviewed configured source. |
-| SSH permission denied | Whether `.gitmodules` points to a private host and operator is entitled | Stop. Use authorized access, or approve a public mirror only after proving the exact SHA exists. |
-| Host key prompt | Expected source host and organization instructions | Do not accept an unknown key merely to proceed. Verify out of band. |
-| Submodule begins with `-` in status | It is not initialized | Run the checkout's documented init after source review. |
-| Submodule begins with `+` | Checked-out SHA differs from gitlink | Stop. Restore the pinned commit or review an explicit upgrade. |
-| Commit unavailable on proposed mirror | Mirror provenance or incomplete history | Do not substitute a nearby commit or branch head. Escalate. |
+| `cloudflare-os/package.json` is absent | `git status`, tracked tree, last sync commit | The vendored kernel directory is incomplete. Restore it (`git checkout HEAD -- cloudflare-os`) or re-clone; do not hand-reconstruct it. |
+| Boundary check fails on tree mismatch | `pnpm check:boundary` output, pin file, last sync commit | The vendored tree diverged from the recorded pin. Restore from the sync commit or review an intentional change; never edit the pin file to mask it. |
+| Pin commit unavailable locally/offline | Whether `git fetch` of the pin succeeds | Structural checks still ran. Re-run the boundary check online before deploying. |
+| Manual edits inside `cloudflare-os/` | `git diff HEAD -- cloudflare-os` | A local kernel patch collides with every upstream sync. Revert it and express the change in outer `packages/`, `scripts/`, or `docs/`. |
 
-Never use `git submodule update --remote` for setup or recovery.
+Never adopt an unreviewed upstream commit by editing the pin file manually.
 
 ## Toolchain And Install
 
@@ -54,8 +52,8 @@ Never use `git submodule update --remote` for setup or recovery.
 | --- | --- | --- |
 | Unsupported engine or syntax | Node major and repository `packageManager` | Install the documented Node/pnpm versions. Do not regenerate the lockfile with another manager. |
 | `pnpm` lockfile changes on install | pnpm version, checkout cleanliness, dependency provenance | Stop and review. A setup operation should not silently become a dependency update. |
-| Package missing under submodule | Separate root and `cloudflare-os` installs | Run both documented installs. |
-| Build fails after submodule move | Parent wrapper compatibility, base configs, APIs, dependencies | Treat it as an incomplete upgrade, not an ordinary build issue. |
+| Package missing under the kernel | Separate root and `cloudflare-os` installs | Run both documented installs. |
+| Build fails after an upstream sync | Parent wrapper compatibility, base configs, APIs, dependencies | Treat it as an incomplete upgrade, not an ordinary build issue. |
 | `wrangler.prod.jsonc` remains | Active check/deploy process and original failure | Preserve the error, prove no active process, then remove only stale generated files. Never edit/deploy them. |
 | Concurrent writes to generated config | Multiple operations in one checkout | Stop both safely and use separate worktrees. |
 
@@ -257,7 +255,7 @@ After two identical failures, provide:
 
 ```text
 Goal and operation mode:
-Root/submodule commits and source provenance:
+Root commit, recorded upstream pin, and source provenance:
 Target account/route (redacted as appropriate):
 Exact failing stage and first sanitized error:
 Stages already mutated and deployment IDs:

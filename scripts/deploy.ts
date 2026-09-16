@@ -1,4 +1,4 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -655,8 +655,8 @@ export function generateConfigs(
 // `--no-cache` goes before the task name. Everything after it is `[ADDITIONAL_ARGS]`, forwarded to
 // the task's own command -- `vp run -F x build --no-cache` reaches `tsc` as an unknown option.
 
-/** `vp run --no-cache <task>` for a package in the submodule's workspace. */
-function submoduleBuild(pkg: string, task = "build"): string[] {
+/** `vp run --no-cache <task>` for a package in the vendored kernel's workspace. */
+function kernelBuild(pkg: string, task = "build"): string[] {
   return ["--dir", "cloudflare-os", "exec", "vp", "run", "-F", pkg, "--no-cache", task];
 }
 
@@ -669,7 +669,7 @@ function ownBuild(pkg: string, task = "build"): string[] {
  * The build steps `pnpm check` and `pnpm deploy` run, in order, from the repository root.
  *
  * Every one goes through `vp run` rather than `pnpm --filter <pkg> build`. Two of the three
- * submodule targets have no `build` *script* at all any more -- they have a Vite+ *task*, which
+ * kernel targets have no `build` *script* at all any more -- they have a Vite+ *task*, which
  * `pnpm --filter` cannot see -- and `vp run` runs scripts and tasks alike, so one form covers both.
  *
  * `--no-cache` on every one. A cache hit is only as good as its fingerprint, which is cheap to get
@@ -689,11 +689,11 @@ export function buildCommands(config: DeploymentConfig): BuildCommand[] {
     // nested invocation carrying its own flag -- measured: the configurator app replayed from
     // cache. Rebuilding it here from source is what upstream's own `deploy` script does; the
     // `build` step below then type-checks and replays the bytes this step just wrote.
-    { args: submoduleBuild("@gadgets/gatekeeper-context", "build:app") },
-    { args: submoduleBuild("@gadgets/gatekeeper-context") },
+    { args: kernelBuild("@gadgets/gatekeeper-context", "build:app") },
+    { args: kernelBuild("@gadgets/gatekeeper-context") },
     // The Scheduler's `build` nests the same cached `vp run build:app`, so it needs the same pair.
-    { args: submoduleBuild("@gadgets/gatekeeper-scheduler", "build:app") },
-    { args: submoduleBuild("@gadgets/gatekeeper-scheduler") },
+    { args: kernelBuild("@gadgets/gatekeeper-scheduler", "build:app") },
+    { args: kernelBuild("@gadgets/gatekeeper-scheduler") },
     { args: ownBuild("custom-gatekeeper") },
     // Enabled optional Gatekeepers build alongside the other owned Workers. A disabled one is
     // never built: it must not appear in the deployment at all.
@@ -703,9 +703,9 @@ export function buildCommands(config: DeploymentConfig): BuildCommand[] {
     ...(config.errorReporting.enabled ? [{ args: ownBuild("error-reporter") }] : []),
     // Access mode is a build-time constant in the frontend bundle (`src/useAuth.ts`), so it is set
     // here rather than inherited: a bundle built under a different value is wrong, not just stale.
-    { args: submoduleBuild("@gadgets/workshop-frontend"), env: { VITE_CF_ACCESS_MODE: "true" } },
-    { args: submoduleBuild("@gadgets/router") },
-    { args: submoduleBuild("@gadgets/workshop-backend") },
+    { args: kernelBuild("@gadgets/workshop-frontend"), env: { VITE_CF_ACCESS_MODE: "true" } },
+    { args: kernelBuild("@gadgets/router") },
+    { args: kernelBuild("@gadgets/workshop-backend") },
   ];
 }
 
@@ -768,14 +768,14 @@ export function runCommand(
 /**
  * `[command, argv]` for spawning pnpm from this script, Windows-safe.
  *
- * Delegates to the submodule's `pnpmCommand`, then repairs the one case it cannot handle: a
- * Windows standalone-pnpm install sets `npm_execpath` to `pnpm.exe`, which the submodule's
+ * Delegates to the kernel's `pnpmCommand`, then repairs the one case it cannot handle: a
+ * Windows standalone-pnpm install sets `npm_execpath` to `pnpm.exe`, which the kernel's
  * JS-entry regex deliberately does not match, leaving a bare `"pnpm"` that `spawnSync` cannot
  * execute (no extensionless executable on Windows). An `.exe` spawns directly, no shell needed.
  * A non-`.exe` execpath (e.g. npm's `npm-cli.js`) is left as the loud ENOENT fallback — spawning a
- * `.js` as an executable would be wrong, and the submodule's comment warns against substituting it.
+ * `.js` as an executable would be wrong, and the kernel's comment warns against substituting it.
  *
- * Lives here rather than in the submodule because `cloudflare-os/` is the reviewed upstream
+ * Lives here rather than in the kernel because `cloudflare-os/` is the vendored upstream
  * baseline; see scripts/boundary-check.ts.
  */
 export function pnpmSpawnArgs(
@@ -788,6 +788,33 @@ export function pnpmSpawnArgs(
   const exec = env.npm_execpath;
   if (platform === "win32" && exec && /\.exe$/i.test(exec) && existsSync(exec)) {
     return [exec, argv];
+  }
+  if (platform === "win32") {
+    // Callers not started through a pnpm script (CI steps, direct `node scripts/deploy.ts`) have
+    // no npm_execpath at all. Resolve the real pnpm.exe the way the system shim does: the
+    // standalone launcher lives at %LOCALAPPDATA%\pnpm\pnpm.exe, and the bin shim quotes the
+    // actual exe it delegates to. Spawning the found .exe directly needs no shell, so the
+    // argv-splitting hazard the bare-command path has stays avoided.
+    const localAppData = env.LOCALAPPDATA;
+    if (localAppData) {
+      const candidates = [join(localAppData, "pnpm", "pnpm.exe")];
+      const shim = join(localAppData, "pnpm", "bin", "pnpm.CMD");
+      let shimText = "";
+      try {
+        shimText = readFileSync(shim, "utf8");
+      } catch {
+        shimText = "";
+      }
+      const quoted = shimText.match(/@?"([^"]+pnpm\.exe)"/i);
+      if (quoted) {
+        // The shim delegates with the unexpanded `%~dp0` batch variable -- "this shim's
+        // directory". Expand it, then resolve the (typically relative) target it points at.
+        const exePath = quoted[1].replace(/%~dp0/gi, `${join(localAppData, "pnpm", "bin")}`);
+        candidates.push(resolve(exePath));
+      }
+      const found = candidates.find((candidate) => existsSync(candidate));
+      if (found) return [found, argv];
+    }
   }
   return [command, argv];
 }
@@ -813,9 +840,13 @@ function deployWorker(dir: string, extraArgs: string[]): void {
   }
 }
 
-function requireSubmodule(): void {
+function requireKernelCheckout(): void {
   if (!existsSync(join(root, "cloudflare-os/package.json"))) {
-    throw new Error("CloudflareOS submodule is not initialized. Run git submodule update --init.");
+    throw new Error(
+      "The vendored cloudflare-os kernel is missing (no cloudflare-os/package.json). " +
+        "The upstream source lives in the tracked cloudflare-os/ directory -- a fresh clone already has it; " +
+        "if it is absent the checkout is incomplete.",
+    );
   }
 }
 
@@ -888,7 +919,7 @@ function reportAiGateway(config: DeploymentConfig): void {
 }
 
 async function main(): Promise<void> {
-  requireSubmodule();
+  requireKernelCheckout();
   const configPath = resolveConfigPath(process.argv);
   const config = await readDeployment(configPath);
   // Enabled optional Gatekeepers read their own base config from their package; disabled ones are

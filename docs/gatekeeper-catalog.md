@@ -1,8 +1,6 @@
 # Optional Gatekeeper catalog
 
-The Starter has one deployment boundary: `deployment.jsonc` in the outer
-`cloudflare-os-starter` repository. The nested `cloudflare-os` checkout is the reviewed upstream
-source baseline and is not a second application checkout.
+The Starter has one deployment boundary: `deployment.jsonc` in the outer `cloudflare-os-starter` repository. The `cloudflare-os` directory is the vendored upstream source baseline — synced from the official repository by `.github/workflows/sync-upstream.yml` and verified against the recorded pin by `pnpm check:boundary` — and is not a second application checkout.
 
 `scripts/deployment-config.ts` contains the metadata catalog for optional Gatekeepers. Each entry
 carries the full service graph: stable ID, package directory, Router binding, URL prefix,

@@ -78,3 +78,19 @@ deployment dry run against `scripts/deployment.ci.jsonc` on `ubuntu-latest` and 
 with Node 24.19.0 / pnpm 11.17.0 and frozen installs for both workspace roots. CI runs with no
 vendor credentials and no remote deployments: dry runs verify bundling and configuration, not live
 permissions.
+
+## Supersession — single-repository merge (September 16, 2026)
+
+The two-repository structure above was merged into one:
+
+- The `cloudflare-os` submodule (pinned at `0272b060`) was replaced by a vendored upstream tree —
+  a `git subtree` squash import at the same commit, tracked as an ordinary directory.
+- `.gitmodules` was removed. `scripts/boundary-check.ts` now verifies the vendored tree against
+  the recorded pin (`scripts/upstream-pin.json`) instead of a gitlink, plus workspace-catalog
+  consistency.
+- `.github/workflows/sync-upstream.yml` merges upstream main daily: subtree pull, catalog
+  re-sync (`scripts/catalog-sync.ts`), pin update, full release checks; green syncs auto-commit
+  to main, red ones open a review PR.
+- The kernel bump procedure ("Bump the pinned upstream kernel to …" commits) is superseded by the
+  automated sync. The toolchain facts above (Node 24.19.0, pnpm 11.17.0, TypeScript 7.0.2) are
+  unchanged; the inner workspace install remains required for deployment builds.

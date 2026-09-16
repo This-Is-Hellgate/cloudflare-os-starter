@@ -5,14 +5,14 @@
 // The model-facing TaskSession cannot append verified evidence, mint grants, or certify its own
 // completion — those go through trusted internal paths only.
 
-import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
+import { DurableObject, RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import { hashPayload } from "@gadgets/stage";
 
 import {
   deriveChildGrant, grantUsable,
 } from "./authority.js";
-import { migrate, SCHEMA_VERSION, TaskStorage, type SqlLike } from "./storage.js";
+import { migrate, TaskStorage, type SqlLike } from "./storage.js";
 import type { ActionRef } from "@gadgets/stage";
 import type {
   CheckpointRecord, ChildRecord, ChildResult, EvidenceRecord, EvidenceKind, Grant, TaskRecord,

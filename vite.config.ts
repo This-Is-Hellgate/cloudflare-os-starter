@@ -1,8 +1,9 @@
 import { defineConfig } from 'vite-plus'
 
 /**
- * Repo-wide toolchain config, ported from the submodule's own `vite.config.ts` so a contributor
- * moving between the two repositories meets the same ruleset.
+ * Repo-wide toolchain config, ported from the vendored kernel's own `vite.config.ts` (kept in
+ * sync with upstream by the sync workflow) so a contributor moving between the kernel and this
+ * repository meets the same ruleset.
  *
  * Lint only. There is deliberately no `run.tasks` block here: Vite+ creates a task for every
  * package from a workspace-root task definition, including the root package itself, and the root
@@ -61,7 +62,7 @@ export default defineConfig({
       'unicorn/consistent-function-scoping': 'warn',
     },
     ignorePatterns: [
-      // The submodule lints itself, with its own config, its own plugins (including the local
+      // The kernel lints itself, with its own config, its own plugins (including the local
       // `gadgets/prefer-jsdoc` rule this file does not load) and its own per-directory overrides.
       // Linting it from here would report findings nobody in this repository can fix.
       'cloudflare-os/**',

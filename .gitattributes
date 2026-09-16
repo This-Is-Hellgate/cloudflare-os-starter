@@ -1,4 +1,4 @@
-# Every checkout gets LF, on every platform. Matches the submodule's own .gitattributes.
+# Every checkout gets LF, on every platform. Matches the vendored kernel's own .gitattributes.
 # Maintainers are mostly on macOS/Linux, where this is the default, but on Windows
 # `core.autocrlf=true` is, and a CRLF working copy breaks anything comparing file bytes.
 * text=auto eol=lf

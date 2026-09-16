@@ -5,16 +5,17 @@ packages:
   - packages/*
 
 # Mirror of cloudflare-os/pnpm-workspace.yaml's catalog. Required, not merely tidy: the two
-# submodule packages above are members of THIS workspace, and both declare `catalog:` specifiers
-# that resolve here rather than in the submodule -- without these entries `pnpm install` fails
+# kernel packages above are members of THIS workspace, and both declare `catalog:` specifiers
+# that resolve here rather than in the kernel -- without these entries `pnpm install` fails
 # outright.
 #
-# Keep every shared entry byte-identical to the submodule's when bumping the gitlink. Drift is
-# silent: the starter and the submodule install separately, so a different capnweb range gives the
-# tree two copies, and a stub minted by one is unserialisable by the other's session
+# The kernel's catalog is the source of truth for shared entries: the vendored kernel directory
+# syncs with upstream (`.github/workflows/sync-upstream.yml`), and `scripts/catalog-sync.ts`
+# re-syncs this block automatically on every sync. Drift is silent if left alone: the kernel and
+# the starter install separately, so a different capnweb range gives the tree two copies, and a
+# stub minted by one is unserialisable by the other's session
 # (`TypeError: Cannot serialize value: [object RpcStub]`). A deduped dev machine hides it; the
-# split installs in CI and on a fresh checkout do not. See
-# cloudflare-os/docs/integration-testing.md.
+# split installs in CI and on a fresh checkout do not. See cloudflare-os/docs/integration-testing.md.
 catalog:
   '@cloudflare/vitest-pool-workers': ^0.22.0
   '@cloudflare/workers-types': ^5.20260903.1
@@ -22,15 +23,15 @@ catalog:
   diff: ^8.0.4
   # Exact: pinned in lockstep with capnweb (declared as a >=0.7.0 peer)
   capnweb-validate: 0.3.0
-  # Exact: TypeScript 7 (tsgo). The submodule's tsconfig sets `singleThreaded`, which TS 5.9
+  # Exact: TypeScript 7 (tsgo). The kernel's tsconfig sets `singleThreaded`, which TS 5.9
   # rejects outright, so every package extending it has to be on 7.x. Nothing here uses the JS
-  # compiler API, so the submodule's `typescript6` alias is not needed.
+  # compiler API, so the kernel's `typescript6` alias is not needed.
   typescript: 7.0.2
   # Exact, not ranged: the transform has to stay on esbuild. Oxc does not lower the Stage-3
   # decorators capnweb-validate's `@validateRpc()` relies on (cloudflare/workers-sdk#12626).
   vite: 7.3.6
   vite-plus: ^0.2.8
-  vitest: ^4.1.10
+  vitest: ^4.1.11
   wrangler: ^4.128.0
 
 overrides:
@@ -41,7 +42,7 @@ overrides:
   # manifest declares itself, and the override is what reaches vite as somebody else's peer.
   vite: "catalog:"
   # Arrives as an optional vite/vitest peer resolved to `latest`; pinned to the same release the
-  # submodule pins so the two installs agree.
+  # kernel pins so the two installs agree.
   '@types/node': 26.1.0
 
 allowBuilds:

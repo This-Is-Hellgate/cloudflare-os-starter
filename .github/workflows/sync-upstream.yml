@@ -1,0 +1,109 @@
+# Keeps the vendored kernel in lockstep with upstream.
+#
+# Runs on a schedule: merges upstream main into the vendored `cloudflare-os/` directory (git
+# subtree squash), re-syncs the shared catalog, updates the recorded pin, then verifies the whole
+# repository. Green checks push straight to main; anything red opens a review PR instead — an
+# upstream change can never land here without passing the starter's own tests, lint, and checks.
+# Manual runs via workflow_dispatch.
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "17 9 * * *" # daily, offset from the top of the hour
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git subtree needs full history to track its squash state
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.17.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: Merge upstream main into the vendored kernel
+        id: merge
+        run: |
+          set -euo pipefail
+          git config user.name "upstream-sync"
+          git config user.email "actions@users.noreply.github.com"
+          git remote add upstream https://github.com/cloudflare/cloudflare-os.git
+          git fetch upstream main
+          UPSTREAM_SHA="$(git rev-parse upstream/main)"
+          PIN_SHA="$(node -p "require('./scripts/upstream-pin.json').commit")"
+          echo "Upstream $UPSTREAM_SHA; recorded pin $PIN_SHA"
+          if [ "$UPSTREAM_SHA" = "$PIN_SHA" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Upstream has not moved since the recorded pin."
+            exit 0
+          fi
+          git subtree pull --prefix=cloudflare-os upstream main --squash \
+            -m "Sync vendored cloudflare-os to $UPSTREAM_SHA"
+          # Catalog drift is fixed automatically; the kernel's catalog is the source of truth.
+          node scripts/catalog-sync.ts || true
+          UPSTREAM_SHA="$UPSTREAM_SHA" node -e "
+            const fs = require('fs');
+            const pin = JSON.parse(fs.readFileSync('scripts/upstream-pin.json', 'utf8'));
+            pin.commit = process.env.UPSTREAM_SHA;
+            pin.syncedAt = new Date().toISOString().slice(0, 10);
+            fs.writeFileSync('scripts/upstream-pin.json', JSON.stringify(pin, null, 2) + '\n');
+          "
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit the sync
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git add -A
+          if git diff --cached --quiet HEAD; then
+            echo "Upstream moved without changing tracked files; nothing to commit."
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "Sync vendored cloudflare-os to $(git rev-parse upstream/main)"
+            echo "committed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install (starter and vendored kernel)
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          pnpm install
+          pnpm --dir cloudflare-os install --frozen-lockfile
+
+      - name: Verify (test, lint, boundary check, deployment dry run)
+        id: verify
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          pnpm test
+          pnpm lint
+          pnpm check
+
+      - name: Push to main (green gate passed)
+        if: steps.merge.outputs.changed == 'true' && steps.verify.conclusion == 'success'
+        run: git push origin HEAD:main
+
+      - name: Open a review PR (checks failed)
+        if: steps.merge.outputs.changed == 'true' && steps.verify.conclusion == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BRANCH="upstream-sync/${GITHUB_RUN_ID}"
+          git push origin "HEAD:${BRANCH}"
+          gh pr create \
+            --head "$BRANCH" \
+            --title "Upstream sync needs review ($(git rev-parse --short upstream/main))" \
+            --body "The scheduled upstream sync merged upstream main into \`cloudflare-os/\`, but the starter's own checks failed. Review the failures before landing this."

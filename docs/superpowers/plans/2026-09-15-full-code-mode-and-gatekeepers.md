@@ -3,6 +3,8 @@
 > **For agentic workers:** Use `superpowers:executing-plans` to execute approved packets task by task. Subagent execution is an alternative only when requested. Checkboxes track implementation evidence, not permission.
 >
 > **Document status:** Implementation program prepared from the repository survey on September 15, 2026. Creating this document does not start implementation or authorize deployment. Platform integration gates below must be demonstrated before the dependent capability can be enabled.
+>
+> **September 16, 2026:** the repository merged the inner and outer repositories into one — the pinned `cloudflare-os` submodule was replaced by a vendored upstream tree (git subtree squash import at the same pin `0272b060`), kept in sync with upstream by `.github/workflows/sync-upstream.yml`. The global constraint "preserve `cloudflare-os/` as a clean upstream gitlink" now reads: **preserve `cloudflare-os/` as byte-pristine vendored upstream content** — never patch kernel files locally; custom implementation stays in outer `packages/`, `scripts/`, and `docs/`. All other constraints are unchanged.
 
 **Goal:** Deliver an operating environment in which Code Mode composes approved enterprise capabilities, performs governed writes, persists and resumes objectives, delegates narrower work, builds bounded executable adapters, and evaluates the effects of its actions.
 

@@ -30,7 +30,7 @@
 
 ## Overview
 
-This repository adds deployment controls around a pinned [Cloudflare OS](https://github.com/cloudflare/cloudflare-os) release without modifying the upstream source.
+This repository adds deployment controls around the [Cloudflare OS](https://github.com/cloudflare/cloudflare-os) upstream release, vendored in the tracked `cloudflare-os/` directory, without modifying the upstream source. A scheduled workflow keeps the vendored kernel in lockstep with upstream: every upstream change is merged in, verified against this repository's checks, and committed automatically — or opened as a review PR when checks fail.
 
 | Control | What you own |
 | --- | --- |
@@ -65,7 +65,6 @@ Anything past that needs your own code or settings, which is what this repositor
 Install [Node.js 24.19 or newer](https://nodejs.org/) (the deploy scripts are TypeScript run directly by `node`), [pnpm 11.17](https://pnpm.io/installation), and authenticate [Wrangler](https://developers.cloudflare.com/workers/wrangler/commands/#login):
 
 ```sh
-git submodule update --init
 pnpm install
 pnpm --dir cloudflare-os install
 pnpm exec wrangler login
@@ -137,7 +136,7 @@ The complete control reference and recipes live in [Customization](docs/customiz
 - Stream production events with [`wrangler tail`](https://developers.cloudflare.com/workers/observability/logs/real-time-logs/).
 - Triage explicit failures and choose export destinations with the [observability guide](docs/observability.md).
 - Roll a Worker back from its dashboard deployment history or with [`wrangler rollback`](https://developers.cloudflare.com/workers/versions-and-deployments/rollbacks/).
-- Follow the [upgrade checklist](docs/customization.md#upgrade) before changing the pinned submodule.
+- Follow the [upgrade checklist](docs/customization.md#upgrade) before adopting an upstream sync — the scheduled workflow lands green-checked syncs automatically, but any migration-risky change opens a review PR instead.
 - Review the upstream Cloudflare OS documentation and release history before adopting behavior changes.
 
 ### Moving here from the hosted deploy (os.cloudflare.app/deploy)
