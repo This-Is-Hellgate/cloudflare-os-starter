@@ -49,6 +49,8 @@ P0 updates the end-state specification to describe these distinctions before imp
 | Item | Survey evidence |
 |---|---|
 | Outer checkout | `ff8fb79d4ba34dd59180e8fe4cb82b71f83f11ff`, branch `main` |
+
+> **Kernel bump (September 15):** the submodule pin moved `45ae8c21` → `0272b060` (14 upstream commits). Load-bearing changes: `spawnCallable(title, {types, mainType})` returns a `CallableAgent` whose calls resolve once durably queued, accepts persistent callback stubs, and spawned agents persist across restarts (upstream design: `cloudflare-os/plans/spawner-with-persistence.md`); Scheduler `ctx.restore()` is now valid inside the Gadget; `getAgentCatalog()` lost its authorizer parameter and is delivered every turn as non-observation metadata; `packages/integration-tests` exports the real-Workshop harness (Task 3.2 consumes it); `packages/gatekeeper-kit` is upstream's shared gatekeeper machinery; `plans/gatekeeper-kit.md` and `plans/evals-and-e2e-tests.md` are upstream design inputs.
 | Original proposal baseline | `dcc64f2a7e036258a59e7807757b17b86d34a880`; object unavailable locally; ancestry/diff not established |
 | Inner checkout | Clean at `45ae8c21b4b6b30ca81f69fc1f65db1f42a89278` |
 | Existing outer packages | `cursor`, `stage`, `custom-gatekeeper`, `error-reporter`, `gatekeeper-snowflake`, `gatekeeper-huggingface` |
