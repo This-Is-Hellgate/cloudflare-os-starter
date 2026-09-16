@@ -1,0 +1,10 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "gatekeeper-nvidia",
+  "main": ".wrangler/validate/src/index.ts",
+  "build": {"command":"pnpm exec capnweb-validate build --out .wrangler/validate","watch_dir":"src"},
+  "compatibility_date": "2026-09-11",
+  "compatibility_flags": ["allow_irrevocable_stub_storage", "nodejs_compat"],
+  "migrations": [{"tag":"v1","new_sqlite_classes":["NvidiaGatekeeper"]}],
+  "observability": {"enabled":true,"head_sampling_rate":1,"logs":{"invocation_logs":false}}
+}
