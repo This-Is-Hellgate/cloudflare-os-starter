@@ -98,7 +98,13 @@ Task runtime -> evidence/checkpoints/action references/child results/evaluations
 Factory -> private dispatch namespace -> bounded generated adapter
 ```
 
-The task runtime stores task policy and continuity; it has no vendor secrets. Each provider owns vendor permissions, its account connection, and the actual execution boundary. The Stage package supplies reusable lifecycle logic but is **not one account-wide approval database**. Action references always include their owning account/Gatekeeper scope.
+The task runtime stores task policy and continuity; it has no vendor secrets.
+**Composition thesis (September 15):** Code Mode is the composition layer, not another Gatekeeper —
+programs compose the four governed surfaces with ordinary JavaScript (parallel `Promise.all` fan-out,
+derived eval sets, metric aggregation) while every write still rides the per-surface approval/journal
+discipline. Section 1's milestone scope plus P9 extends this to the full governed model-engineering
+loop: eval corpus from Snowflake → candidates from Hugging Face → accelerated evaluation on NVIDIA →
+evidence back to Snowflake → governed GitHub PR. Each provider owns vendor permissions, its account connection, and the actual execution boundary. The Stage package supplies reusable lifecycle logic but is **not one account-wide approval database**. Action references always include their owning account/Gatekeeper scope.
 
 Governed agent profiles receive typed task facades rather than direct provider bindings. Ordinary Workshop chats may retain their native capabilities, but must not be described as constrained by task budgets unless they are running through the governed profile.
 
@@ -396,6 +402,16 @@ Before P4, enforce compute reservations in the NVIDIA account DO using an operat
 
 **Focused verification:** one provider-session scenario covering authorization before network, allowed inference, and a denied model/oversized response. Reuse its adapter fixture in the integration suite.
 
+### Task 3.3: Bounded Hugging Face model and dataset discovery
+
+**Modify:** `packages/gatekeeper-huggingface/src/huggingface.ts`, `types.d.ts`, `types-code.ts`; existing suites.
+
+- [ ] Add bounded read-only `searchModels(query)` / `searchDatasets(query)` through the official Hub search API (fixed host, bounded result count, capped fields: id, task tags, downloads, likes, library). No arbitrary filter passthrough beyond a bounded allowlisted field set.
+- [ ] `getModelCard`/`getDatasetInfo` already bound a specific repo; discovery returns candidates only — binding still required before any session capability is minted.
+- [ ] Extend the session source-contract suite for the two methods; reuse the bounded-read pattern.
+
+**Acceptance:** the M2 tournament can discover candidate models through the governed surface instead of operator hand-listing; a search cannot widen what a session may touch.
+
 ### Task 3.2: One shared integration harness and M1 proof
 
 **Extend the package introduced in Task 1.1:** `packages/operating-environment-tests/package.json`, `vite.config.ts`, `vitest.config.ts`, `src/harness.ts`, `src/composition.test.ts`.
@@ -576,6 +592,39 @@ Before P4, enforce compute reservations in the NVIDIA account DO using an operat
 - [ ] Promote activation per packet only after its evidence passes. Release notes name the achieved milestone and remaining optional extensions.
 
 **Acceptance:** one objective can complete the full governed loop after its originating model context has ended; operators can inspect, revoke, reconcile, and recover it.
+
+## P9 — Enterprise compute plane extension (future; not part of M1/M2)
+
+The governed composition thesis — Code Mode composing Snowflake, GitHub, Hugging Face, and NVIDIA
+as one programmable closed loop — is the M2 architecture. Verification against the current surfaces
+(September 15) established which capability programs are reachable now and which need the items
+below. Each item carries its own authority review before activation; nothing here bypasses the
+approval/journal discipline.
+
+### Task 9.1: NVIDIA retrieval surface — reranking and multimodal
+
+- [ ] Extend the NVIDIA gatekeeper with `rerank` (query + bounded candidate documents) and multimodal embedding / VLM inference per NVIDIA's current retrieval APIs. Verify the exact endpoints, request/response shapes, quotas, and pricing at implementation time; do not build from assumptions.
+- [ ] Image-bearing inputs ride strictly bounded base64 strings with per-part byte ceilings, total-request ceilings, and the existing UTF-8/policy discipline; image content is never treated as executable or stored beyond bounded evidence.
+- [ ] Multimodal embedding/reranking enables the multimodal extraction program (document/image → embed → retrieve → rerank → VLM extraction → typed facts → Snowflake) with GitHub-held schemas.
+
+### Task 9.2: Hugging Face artifact lifecycle — Jobs and Inference Endpoints
+
+- [ ] HF Jobs (training/batch compute) and Inference Endpoints management (deployed revision, hardware, replica range, scaling) are operator-control surfaces requiring the P6-style review pattern: capability matrix, token scope verification, receipt design, compensation limits. The data→artifact lineage program (Snowflake snapshot → HF dataset → GitHub training code → HF model revision → NVIDIA validation → Snowflake lineage record) is reachable without Jobs once an operator executes training outside the governed surface; Jobs brings that execution inside with explicit authority.
+- [ ] Training remains excluded from M1/M2 by the end-state spec; this task is the reviewed path to revisit that exclusion.
+
+### Task 9.3: Event ingress — HF webhooks and GitHub event receivers
+
+- [ ] A webhook/event receiver surface for HF repository events and GitHub events (PR merged, release), routed through the Router with the same Access boundary, feeding Scheduler-style durable hooks. Ingress design must respect the Router-only-public-ingress rule and bound payload sizes; untrusted webhook payloads are evidence, never authority.
+- [ ] Enables event-driven maintenance (new model revision → dependency check → bounded regression run → compare baseline → propose upgrade PR or record evidence).
+
+### Task 9.4: Snowflake read-surface refinement — bounded CTE traversal
+
+- [ ] `boundedSelect` requires statements to start with SELECT, so `WITH ... RECURSIVE` graph traversal is refused. Amend the read-surface guard to permit a bounded `WITH`-prefixed SELECT (statement-class guard unchanged: reads stay SELECT-class, role-RBAC-governed), enabling SQL-native recursive ontology traversal. Iterative client-side traversal remains the interim answer.
+- [ ] Cortex Search + `AI_FILTER`/`AI_EXTRACT`/`AI_AGG` inside SELECT already pass the guard and role RBAC governs; pin with a fixture.
+
+### Task 9.5: Lineage and ontology convenience layer
+
+- [ ] Optional task-runtime helpers for ENTITIES/RELATIONS provenance records (subject/predicate/object + provenance + confidence) emitted from governed writes, so capability programs can query lineage without hand-rolling joins.
 
 ## 6. Verification budget — no test soup
 
