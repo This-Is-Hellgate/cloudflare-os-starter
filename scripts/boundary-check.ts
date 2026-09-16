@@ -57,8 +57,21 @@ export function collectBoundaryIssues(root = resolve(import.meta.dirname, ".."))
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-    if (status) {
-      issues.push("nested cloudflare-os has local modifications or untracked files");
+    // Upstream generates workshop-backend build artifacts into src/generated/ at build time
+    // (bundled blueprint formats, browser-export runtimes). Most names are in upstream's own
+    // .gitignore; `format-blueprints.ts` is not, as of the current pin, so a clean checkout goes
+    // dirty after every `pnpm check`. Untracked files under that one directory are expected build
+    // outputs, not boundary drift; every other untracked path, and ANY modified/deleted/staged
+    // path, still fails.
+    const isGeneratedArtifact = (line: string): boolean => {
+      if (!line.startsWith("?? ")) return false;
+      const path = line.slice(3);
+      return path === "packages/workshop-backend/src/generated/"
+        || path.startsWith("packages/workshop-backend/src/generated/");
+    };
+    const drift = status.split("\n").filter((line) => line && !isGeneratedArtifact(line));
+    if (drift.length) {
+      issues.push(`nested cloudflare-os has local modifications or untracked files: ${drift.join(", ")}`);
     }
   } catch (error) {
     issues.push(`cannot inspect nested cloudflare-os status: ${(error as Error).message}`);
