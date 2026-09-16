@@ -104,7 +104,14 @@ programs compose the four governed surfaces with ordinary JavaScript (parallel `
 derived eval sets, metric aggregation) while every write still rides the per-surface approval/journal
 discipline. Section 1's milestone scope plus P9 extends this to the full governed model-engineering
 loop: eval corpus from Snowflake → candidates from Hugging Face → accelerated evaluation on NVIDIA →
-evidence back to Snowflake → governed GitHub PR. Each provider owns vendor permissions, its account connection, and the actual execution boundary. The Stage package supplies reusable lifecycle logic but is **not one account-wide approval database**. Action references always include their owning account/Gatekeeper scope.
+evidence back to Snowflake → governed GitHub PR. Each provider owns vendor permissions, its account connection, and the actual execution boundary.
+**The fourth loop (September 15):** REASON → PROGRAM → EXECUTE → PROVE → REUSE → CRYSTALLIZE →
+LESS REASONING NEXT TIME. Repeated governed programs become durable deterministic assets: recurrence
+is evidenced by task-run history (P4), the program is extracted, replayed deterministically against
+recorded evidence, proposed through the normal approval path into GitHub, and promoted as a typed
+library/skill. Future occurrences route through the crystallized artifact with only exceptions and
+final results surfacing to the model. This is the M3 headline and the compounding-economics claim:
+intelligence cost can decline as the environment matures. The Stage package supplies reusable lifecycle logic but is **not one account-wide approval database**. Action references always include their owning account/Gatekeeper scope.
 
 Governed agent profiles receive typed task facades rather than direct provider bindings. Ordinary Workshop chats may retain their native capabilities, but must not be described as constrained by task budgets unless they are running through the governed profile.
 
@@ -617,6 +624,22 @@ below. Each item carries its own authority review before activation; nothing her
 approval/journal discipline.
 
 ### Task 9.1: ~~NVIDIA retrieval surface~~ — MOVED INTO P3.1 (September 15, operator decision: narrowness without cause is deferral; rerank + multimodal embed + VLM ship with the NVIDIA gatekeeper, including bounded base64 ceilings, image-aware budget pricing, and the image observation-gating review).
+
+### Task 9.6: NVIDIA deterministic-solver and heavy-compute surfaces
+
+- [ ] cuOpt (routing, LP/QP/MILP), Isaac/Omniverse simulation, TensorRT/NeMo optimization, and NeMo Curator-style curation are a different surface class from inference: long-running, GPU-bound, stateful jobs. Each gets the P6-pattern review (capability matrix, token scope, receipts, compensation) and a bounded-job lifecycle design before exposure. Unblocks the operations-research, digital-twin, robotics-qualification, conversion-compiler, and heavy-curation programs.
+
+### Task 9.7: Audio input class
+
+- [ ] Bounded audio inputs (base64 with per-part/total ceilings, duration limits, an audio content-type policy) and ASR/diarization/transcription NIM endpoints. Same review shape as the image-part widening; unblocks the audio-intelligence pipeline.
+
+### Task 9.8: Snowflake object-management surface
+
+- [ ] Governed creation/management of namespaced Snowflake objects (dynamic tables, streams, tasks, Cortex services) through the SQL API — currently denied as unapproved object creation. Requires the P6-pattern review: operator-approved namespaces, dependency-ordered resource diffs, versioned receipts, compensation limits. Unblocks agent-generated data products and pipeline optimization.
+
+### Task 9.9: Hub and GitHub metadata discovery
+
+- [ ] Bounded HF Spaces discovery + Space app metadata (agents.md/OpenAPI inspection) — the capability-laboratory program. Bounded GitHub Checks / code-scanning-alert reads — model-aware CI and security-remediation programs. Small read-only additions with upstream-surface review.
 
 ### Task 9.2: Hugging Face artifact lifecycle — Jobs and Inference Endpoints
 
