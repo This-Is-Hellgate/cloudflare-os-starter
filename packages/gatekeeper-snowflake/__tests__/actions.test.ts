@@ -45,31 +45,30 @@ describe("Snowflake durable action model", () => {
     expect(gatekeeper).toContain("this.#gated.apply(actionId, {");
     expect(gatekeeper).toContain("writesEnabled: writesEnabled(this.env)");
     // The session-side stage/submit/discard/mark-pending dance lives in proposeAction.
-    expect(gatekeeper).not.toMatch(/catch \(error\)/);
+    expect(gatekeeper).toContain("matchesPreauthorization(snowflakePolicy(this.env), record.plan)");
   });
 
   it("refuses to execute while the executor is disabled", () => {
     expect(gatekeeper).toContain("Snowflake action executor is not enabled.");
   });
 
-  it("re-validates the stored payload through the shared policy before executing", () => {
-    expect(gatekeeper).toContain("validateWriteProposal(policy, record.operation, record.target, record.sql)");
+  it("re-validates the stored plan through the shared policy before executing", () => {
+    expect(gatekeeper).toContain("validateWritePlan(policy, plan)");
+    expect(gatekeeper).toContain("refuseLegacySqlWrite()");
     expect(gatekeeper).toContain("async #execute(record: StoredSnowflakeAction, _attempt:");
   });
 
-  it("executes the approved DML against the SQL API with the configured role and warehouse", () => {
-    expect(gatekeeper).toContain("statement: record.sql");
-    expect(gatekeeper).toContain("this.env.SNOWFLAKE_WAREHOUSE ? { warehouse: this.env.SNOWFLAKE_WAREHOUSE }");
+  it("executes the approved plan with server-side bindings and a stable requestId", () => {
+    expect(gatekeeper).toContain("os-");
+    expect(gatekeeper).toContain("buildMaterializedInsertRows");
   });
 
-  it("executes the approved DML only through the executor callback, whose success the shared runtime records", () => {
-    expect(gatekeeper).toContain("statement: record.sql");
-    expect(gatekeeper).toContain("this.env.SNOWFLAKE_WAREHOUSE ? { warehouse: this.env.SNOWFLAKE_WAREHOUSE }");
+  it("executes the approved plan only through the executor callback, whose success the shared runtime records", () => {
     expect(gatekeeper).toContain("execute: (stored, attempt) => this.#execute(stored, attempt)");
   });
 
   it("maps stored records onto the public write proposal with honest state", () => {
-    expect(gatekeeper).toContain("simulated: record.state !== \"approved\"");
+    expect(gatekeeper).toContain("simulated: settled !== \"succeeded\"");
     expect(gatekeeper).toContain("findActionByProposalId");
   });
 });
@@ -78,7 +77,9 @@ describe("Snowflake write proposal policy", () => {
   const session = extractClass("SessionImpl");
 
   it("routes fresh proposals through the shared validation authority", () => {
-    expect(session).toContain("validateWriteProposal(p, operation, target, sql)");
+    // Parse-or-refuse: the SQL is compiled to the governed plan; anything uncertifiable refuses.
+    expect(session).toContain("parseWriteSql(");
+    expect(session).toContain("proposePlan(");
   });
 
   it("routes fresh proposals through the shared proposeAction lifecycle", () => {
@@ -163,7 +164,7 @@ describe("Snowflake API and capability surface", () => {
   it("keeps types-code.ts hand-synced with types.d.ts", () => {
     const declarations = readFileSync(new URL("../src/types.d.ts", import.meta.url), "utf8");
     const code = readFileSync(new URL("../src/types-code.ts", import.meta.url), "utf8");
-    for (const marker of ["proposeWrite(operation: \"insert\" | \"update\" | \"merge\", target: string, sql: string): Promise<SnowflakeWriteProposal>", "getWriteProposal(proposalId: string): Promise<SnowflakeWriteProposal | null>", "runReadOnlySql(sql: string, options: ReadOnlySqlOptions): Promise<ReadOnlySqlResult>", "runReadOnlySqlPages(sql: string, options: ReadOnlySqlOptions): Promise<ReadOnlySqlPages>", "cortexAnalyst(request: CortexAnalystRequest): Promise<CortexAnalystResult>"]) {
+    for (const marker of ["proposeWrite(operation: SnowflakeWriteOperation, target: string, sql: string): Promise<SnowflakeWriteProposal>", "proposePlan(plan: SnowflakeWritePlan): Promise<SnowflakeWriteProposal>", "getWriteProposal(proposalId: string): Promise<SnowflakeWriteProposal | null>", "runReadOnlySql(sql: string, options: ReadOnlySqlOptions): Promise<ReadOnlySqlResult>", "runReadOnlySqlPages(sql: string, options: ReadOnlySqlOptions): Promise<ReadOnlySqlPages>", "cortexAnalyst(request: CortexAnalystRequest): Promise<CortexAnalystResult>"]) {
       expect(declarations).toContain(marker);
       expect(code).toContain(marker);
     }

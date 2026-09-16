@@ -49,19 +49,46 @@ allowlists, and approval-gated DML through the shared Stage action ledger.
 - Analyst-generated SQL is auto-executed only when its schema is allowlisted and the statement
   passes the same bounded-SELECT guard; otherwise the statement is returned unexecuted.
 
-## Write surface
+## Write surface (governed write grammar)
 
-- Fresh proposals and the executor share one validation authority, `validateWriteProposal()`:
-  operation must be `insert`/`update`/`merge`, target must be `DATABASE.SCHEMA.TABLE` and
-  allowlisted, SQL must start with the declared operation, must not contain destructive keywords
-  (DROP/TRUNCATE/ALTER/CREATE/GRANT/REVOKE/CALL/DELETE), and must fit `MAX_SQL` (32 000 chars).
-- Proposals are staged in the shared Stage ledger, submitted to the human approval queue with
-  `awaitDecision: true` (writes are not simulated, so the agent pauses), and rolled back
-  (`discardStagedWrite`) if submission fails.
-- Execution is double-gated: a human approval **and** the `SNOWFLAKE_ENABLE_WRITES` operator flag.
-  `applyAction` is idempotent for overseer re-delivery, re-validates the stored payload through the
-  same policy before any remote call, and marks the record approved only after the remote write
-  succeeds. `findWriteByProposalId` reports `simulated: record.state !== "approved"` — honest state.
+- **The plan is the authority.** `proposeWrite()` parses SQL with `parseWriteSql()` (parse-or-refuse)
+  into a structured `WritePlan`; `proposePlan()` accepts the plan directly. The same
+  `validateWritePlan()` authority runs at proposal time and again inside the executor against the
+  stored record and the CURRENT policy: target must be exactly `DATABASE.SCHEMA.TABLE` and
+  allowlisted, predicates are closed-world (comparisons, null checks, IN over bound values, bounded
+  AND/OR/NOT), expressions allow operator-allowlisted functions only
+  (`SNOWFLAKE_WRITE_FUNCTIONS` replaces the built-in default), empty update predicates and
+  unconditional deletes are refused, and structure (rows, columns, plan steps, expression nodes) is
+  hard-bounded. DDL and multi-statement scripts are outside the grammar entirely.
+- **Values never interpolate into SQL.** The compiler emits canonical SQL with `?` placeholders and
+  typed server-side bindings (TEXT/FIXED/REAL/BOOLEAN); the compiled SQL is a pure function of the
+  journaled plan, so approved semantics and executed bytes cannot diverge.
+- **Roles are forced, not suggested.** `SNOWFLAKE_ROLE` (and warehouse) are applied after the
+  request body spread, so a request body cannot override them. When `SNOWFLAKE_WRITE_ROLE` /
+  `SNOWFLAKE_WRITE_WAREHOUSE` are configured, approved writes run under them — reads stay on the
+  read role. `INSERT ... SELECT` materializes the subquery through the READ role first (row/byte
+  ceilings), then binds the returned rows into the approved INSERT; subqueries never execute inside
+  the write.
+- **Row ceilings.** Structural row counts (INSERT rows, MERGE sources, materialized reads) are
+  hard-enforced. Predicate mutations (UPDATE/DELETE) carry an advisory COUNT(*) preflight that
+  refuses writes whose count already exceeds the approved ceiling; the documented race means the
+  preflight is a guard, not a guarantee, and the executed row count is journaled.
+- **Preauthorizations.** `SNOWFLAKE_WRITE_PREAUTHORIZATIONS` holds operator-installed patterns
+  (name, operation, target, row ceiling). The match is evaluated DO-side against the stored payload
+  only; a matching write is approved with `preauthorized:<name>` provenance recorded on the Stage
+  record and executed inline. Session code can never select a pattern by flag.
+- **Operator SQL.** `applyOperatorSql()` stages operator-authored SQL (bounded, single-statement,
+  write-gate required), records `operator` provenance, journals it through the same execution
+  journal, and is NOT exposed on the agent-facing session types. The model may draft SQL into a
+  proposal description; drafting is not authority.
+- **Journaling and retries.** Every write carries a stable per-action requestId (Snowflake returns
+  the original status for a repeated requestId instead of re-executing) plus the vendor's
+  statement handle, journaled as receipt evidence. Mid-plan failures record the applied statement
+  handles in the surfaced error. Legacy free-form records are refused with an explicit migration
+  message (`refuseLegacySqlWrite()`), never silently reinterpreted.
+- **Honest state.** `getWriteProposal()` reports `simulated: settled !== "succeeded"` — a recorded
+  approval decision alone does not mean the statement ran; the execution journal's settled attempt
+  is the proof.
 - Reverts are refused (`implementsRevert: false`); Snowflake actions are not auto-reversible.
 
 ## Exclusions

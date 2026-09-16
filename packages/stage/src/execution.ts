@@ -53,6 +53,14 @@ export type ExecutionOutcome =
 /** Read-back answer for reconciliation. "unknown" keeps the attempt indeterminate. */
 export type VendorProbe = () => Promise<"applied" | "absent" | "unknown">;
 
+/**
+ * Thrown by an executor for a DEFINITIVE local refusal that happened before any vendor I/O
+ * (policy gate, preflight ceiling, payload integrity). Absence of an external effect is
+ * provable, so the attempt settles "failed" — unlike an arbitrary throw, which could have
+ * occurred mid-vendor-call and must stay indeterminate.
+ */
+export class LocalRefusal extends Error {}
+
 export interface ApprovedExecution<P> {
   ref: ActionRef;
   subject: ApprovalSubject;
@@ -202,6 +210,11 @@ export class ExecutionJournal {
       const settled = await this.#settle(claimed, execution, "succeeded", input);
       return { status: "succeeded", attempt: settled, idempotent: false };
     } catch (error) {
+      if (error instanceof LocalRefusal) {
+        // The refusal happened before vendor I/O: absence of an effect is provable, failed.
+        const settled = await this.#settle(claimed, execution, "failed", null, error.message.slice(0, 200));
+        return { status: "failed", attempt: settled };
+      }
       // A thrown executor cannot establish absence of an external effect: indeterminate, not failed.
       const settled = await this.#settle(claimed, execution, "indeterminate", null, error instanceof Error ? error.message.slice(0, 200) : String(error));
       return { status: "indeterminate", attempt: settled };

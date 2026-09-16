@@ -10,6 +10,7 @@ export {
 } from "./gated.js";
 export {
   ExecutionJournal,
+  LocalRefusal,
   type ApprovedExecution,
   type ExclusiveRunner,
   type ExecutionOutcome,

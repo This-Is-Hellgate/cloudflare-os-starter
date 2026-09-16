@@ -312,6 +312,16 @@ expect(await h.status(ref)).toBe("succeeded");
 
 ### Task 1.3: Bind Snowflake SQL to authorized objects
 
+> **Amendment (September 15, user-approved):** capability maximized with governance. The model
+> keeps SQL as its input dialect; a parse-or-refuse adapter compiles it to the structured plan
+> that is approved and journaled. The grammar is widened rather than the surface freed: a
+> governed DELETE variant, expression atoms with an operator-configured function allowlist
+> (including CAST and CASE), subquery-fed inserts materialized through the read role, ordered
+> multi-step plans, and operator-installed preauthorization patterns for routine writes. A
+> separate operator-authored SQL path (never model-proposable) keeps one-off ad-hoc fixes
+> available to the organization while model authority stays bounded. DDL remains excluded
+> (P6 governed infrastructure plane).
+
 **Modify:** `packages/gatekeeper-snowflake/src/policy.ts`, `snowflake.ts`, `types.d.ts`, `types-code.ts`, `env.d.ts`, `SECURITY-REVIEW.md`; existing policy/actions suites.
 **Create:** `packages/gatekeeper-snowflake/src/write-plan.ts`.
 

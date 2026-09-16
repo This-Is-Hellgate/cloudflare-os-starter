@@ -15,13 +15,18 @@ import type {
   SnowflakeSession,
 } from "./types.js";
 import TYPES_CODE from "./types-code.js";
-import { Stage, GatedActions, ExecutionJournal, proposeAction, type StageRecord } from "@gadgets/stage";
+import { Stage, GatedActions, ExecutionJournal, LocalRefusal, proposeAction, type StageRecord } from "@gadgets/stage";
 import type { ActionRef, ApprovalSubject } from "@gadgets/stage";
 import { LivePageSource } from "@gadgets/cursor";
 import { boundedSelect, partitionPager, type ReadOnlySqlPage } from "./sql-pages.js";
 import {
-  allowed, boundedInt, boundedText, identifier, qualified, snowflakePolicy, validateWriteProposal,
-  writesEnabled, MAX_QUESTION,
+  buildMaterializedInsertRows, compilePlan, describePlan, validateWritePlan,
+  type WritePlan,
+} from "./write-plan.js";
+import { parseWriteSql } from "./write-sql.js";
+import {
+  allowed, boundedInt, boundedText, identifier, qualified, snowflakePolicy, matchesPreauthorization,
+  refuseLegacySqlWrite, writesEnabled, MAX_QUESTION, MAX_SQL,
 } from "./policy.js";
 
 const RESOURCE: SupportedResource = {
@@ -73,12 +78,20 @@ class SnowflakeApi {
     if (!response.ok) throw new Error(`${label} failed (${response.status}).`);
     return response.json();
   }
-  // The configured role is sent explicitly on every statement: getAccount() advertises it as the
-  // capability's active role, so it must actually govern what runs rather than falling back to
-  // the credential's default role.
-  async request(body: Record<string, unknown>) {
-    const data = await this.#post("/api/v2/statements", { role: this.env.SNOWFLAKE_ROLE, ...body }, "Snowflake request");
+  // The configured role is sent explicitly on every statement AFTER the body spread: a request
+  // body can never override the forced role, and getAccount() advertises it as the capability's
+  // active role, so it must actually govern what runs rather than falling back to the
+  // credential's default role. Writes go through requestAsWrite(): the optional
+  // SNOWFLAKE_WRITE_ROLE/SNOWFLAKE_WRITE_WAREHOUSE split read and write authority.
+  async #run(body: Record<string, unknown>, role: string, warehouse?: string) {
+    const data = await this.#post("/api/v2/statements", { ...body, role, ...(warehouse ? { warehouse } : {}) }, "Snowflake request");
     return this.#resultSet(data);
+  }
+  async request(body: Record<string, unknown>) {
+    return this.#run(body, this.env.SNOWFLAKE_ROLE, this.env.SNOWFLAKE_WAREHOUSE);
+  }
+  async requestAsWrite(body: Record<string, unknown>) {
+    return this.#run(body, this.env.SNOWFLAKE_WRITE_ROLE ?? this.env.SNOWFLAKE_ROLE, this.env.SNOWFLAKE_WRITE_WAREHOUSE ?? this.env.SNOWFLAKE_WAREHOUSE);
   }
 
   /** Normalizes one ResultSet response, including the verified partition metadata. */
@@ -157,7 +170,22 @@ type Props = { account?: string };
   async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> { return (this.ctx.exports as any).SnowflakeVerifier({}); }
 }
 @validateRpc() export class SnowflakeVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier { verify(): void {} }
-type SnowflakeWriteAction = { proposalId: string; operation: "insert" | "update" | "merge"; target: string; sql: string };
+type SnowflakeWriteOperation = "insert" | "update" | "delete" | "merge" | "insert_select" | "plan" | "operator_sql";
+type SnowflakeWriteAction = {
+  proposalId: string;
+  source: "plan" | "operator_sql";
+  operation: SnowflakeWriteOperation;
+  target: string;
+  /** The governed plan: the approved authority. Absent only for operator SQL. */
+  plan?: WritePlan;
+  /** The model's original SQL, kept for the approval display only — never executed. */
+  sourceSql?: string;
+  /** Operator-authored SQL, run as-is behind the operator gate; never model-proposable. */
+  operatorSql?: string;
+  /** Operator note for the journal when the source is operator SQL. */
+  note?: string;
+  summary?: string;
+};
 type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
 
 @validateRpc() export class SnowflakeGatekeeper extends DurableObject<Env, Props> implements Gatekeeper<SnowflakeSession> {
@@ -202,6 +230,11 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
   }
 
   async applyAction(actionId: number): Promise<void> {
+    await this.#apply(actionId);
+  }
+
+  /** The shared execution entry: trusted decision + journaled execution. Used by the overseer callback and by preauthorized inline application. */
+  async #apply(actionId: number): Promise<import("@gadgets/stage").ExecutionOutcome> {
     // Decision + execution are separate. The record's bound subject carries the proposal-time
     // scope; the gate rechecks this DO's current trusted context and expiry before vendor I/O.
     const record = await this.#stage.require(actionId);
@@ -214,39 +247,141 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
       subject,
       ref,
       execute: (stored, attempt) => this.#execute(stored, attempt),
-      // Reconciliation probe: absence of an external effect is established by a vendor read-back,
-      // never assumed. The statement's request id is the key the vendor reconciles by.
-      probe: async () => "unknown",
+      // Reconciliation: attempt 2+ re-POSTs with the same requestId, which makes Snowflake
+      // return the original status instead of executing again. The probe stays "unknown":
+      // absence of an external effect is never assumed.
+      probe: async () => "unknown" as const,
     });
-    // An indeterminate outcome is surfaced to the overseer: the user sees the action failed and
-    // can reconcile. Success (including idempotent redelivery) completes the callback.
-    if (outcome.status === "indeterminate") {
-      throw new Error(`Snowflake action ${actionId} is indeterminate: a vendor effect may exist; reconcile by request id ${outcome.attempt.idempotencyKey}.`);
-    }
+    return outcome;
+  }
+
+  /**
+   * DO-side preauthorization check, evaluated against the STORED payload during the session's
+   * submission flow. A matching write is approved here (provenance recorded on the Stage record)
+   * and executed inline; the queue submission that follows is a no-op because the journal
+   * reports its settled outcome on redelivery. Session code can never select a pattern by flag:
+   * the match runs against the durable record and operator config only.
+   */
+  async markActionPending(actionId: number): Promise<void> {
+    await this.#stage.markPending(actionId);
+    if (!writesEnabled(this.env)) return;
+    const record = await this.#stage.require(actionId);
+    if (record.source !== "plan" || !record.plan) return;
+    const pattern = matchesPreauthorization(snowflakePolicy(this.env), record.plan);
+    if (!pattern) return;
+    await this.#stage.annotate(actionId, { provenance: `preauthorized:${pattern}` });
+    const outcome = await this.#apply(actionId);
     if (outcome.status === "failed") {
-      throw new Error(`Snowflake action ${actionId} failed: ${outcome.attempt.errorCode ?? "unknown error"}.`);
+      // A preauthorized write that definitively failed (operator gate or definitive vendor
+      // error) surfaces here; the queue submission continues so the failure stays visible.
+      throw new LocalRefusal("Preauthorized write " + pattern + " failed: " + (outcome.attempt.errorCode ?? "unknown") + ".");
     }
+  }
+
+  /**
+   * Operator-authored SQL: staged, journaled, and executed through the same gate and journal,
+   * with provenance recorded on the record. NOT exposed on the agent-facing session types —
+   * the model can draft SQL into a proposal description, but drafting is not authority.
+   * Reachable only from the operator/administrative surface.
+   */
+  async applyOperatorSql(sql: string, note?: string): Promise<{ actionId: number }> {
+    if (!writesEnabled(this.env)) throw new LocalRefusal("The Snowflake write gate is disabled; enable SNOWFLAKE_ENABLE_WRITES before operator execution.");
+    if (typeof sql !== "string" || !sql.trim()) throw new LocalRefusal("Operator SQL is required.");
+    const payload: SnowflakeWriteAction = {
+      proposalId: crypto.randomUUID(),
+      source: "operator_sql",
+      operation: "operator_sql",
+      target: "OPERATOR.AD_HOC.SQL",
+      operatorSql: sql,
+      ...(note ? { note: boundedText(note, 500, "operator note") } : {}),
+    };
+    const subject = await this.#trustedSubject("operator_sql", payload.target, Date.now() + 60_000);
+    const actionId = await this.#stage.stage(payload, subject);
+    await this.#stage.annotate(actionId, { provenance: "operator" });
+    await this.#stage.markApproved(actionId);
+    const outcome = await this.#apply(actionId);
+    if (outcome.status !== "succeeded") {
+      throw new Error("Operator SQL failed: " + (outcome.attempt.errorCode ?? outcome.status));
+    }
+    return { actionId };
   }
 
   // The executor runs only behind an explicit operator gate (SNOWFLAKE_ENABLE_WRITES), the
   // trusted overseer decision, and the execution journal's atomic attempt claim. The stored
-  // payload is re-validated against the same policy as a fresh proposal before any remote call.
+  // plan is re-validated against the CURRENT policy (allowlists, ceilings, function allowlist)
+  // and re-compiled — approved semantics and executed bytes cannot drift. Values ride typed
+  // server-side bindings; the statement handle and stable request id are journaled.
   async #execute(record: StoredSnowflakeAction, _attempt: import("@gadgets/stage").ExecutionAttempt): Promise<import("@gadgets/stage").ReceiptInput> {
+    // Legacy records staged before the governed grammar carry free-form SQL: refused with the
+    // migration message, never silently reinterpreted.
+    if (record.source !== "plan" && record.source !== "operator_sql") refuseLegacySqlWrite();
     const policy = snowflakePolicy(this.env);
-    const { database, schema } = validateWriteProposal(policy, record.operation, record.target, record.sql);
-    const result = await new SnowflakeApi(this.env).request({
-      statement: record.sql,
-      timeout: 30,
-      database,
-      schema,
-      ...(this.env.SNOWFLAKE_WAREHOUSE ? { warehouse: this.env.SNOWFLAKE_WAREHOUSE } : {}),
-    });
-    // The vendor's real statement/request identifier when the response carries one; the request
-    // id itself is the reconciliation key either way.
-    return {
-      vendorId: (result as { queryId?: string }).queryId ?? null,
-      version: (result as { statementHandle?: string }).statementHandle ?? null,
+    const api = new SnowflakeApi(this.env);
+    // Stable across attempts: Snowflake returns the original status for a repeated requestId
+    // instead of executing again, so a redelivery cannot duplicate a write.
+    const requestId = `os-${this.env.SNOWFLAKE_ACCOUNT}-${record.actionId}`;
+    const evidence: string[] = [`request:${requestId}`];
+    const write = async (statement: string, bindings?: Record<string, { type: string; value: string | boolean | null }>) => {
+      const result = await api.requestAsWrite({ statement, timeout: 60, requestId, ...(bindings ? { bindings } : {}), database: record.target.split(".")[0].toUpperCase(), schema: record.target.split(".")[1].toUpperCase() });
+      evidence.push(`statement:${result.statementHandle ?? result.queryId}`);
+      return result;
     };
+
+    if (record.source === "operator_sql") {
+      // Operator-authored SQL: bounded, single-statement, executed as written behind the gate.
+      const sql = record.operatorSql ?? "";
+      if (!sql.trim()) throw new LocalRefusal("Operator SQL is required.");
+      if (sql.length > MAX_SQL) throw new LocalRefusal("Operator SQL exceeds the size limit.");
+      if (sql.replace(/'(?:[^']|'')*'/g, "").includes(";")) throw new LocalRefusal("Multi-statement operator SQL is refused; execute statements individually.");
+      const result = await write(sql);
+      if (record.note) evidence.push(`note:${record.note.slice(0, 200)}`);
+      return { vendorId: result.queryId, version: result.statementHandle ?? null, evidenceIds: evidence };
+    }
+
+    const plan = record.plan;
+    if (!plan) throw new LocalRefusal("The stored write action carries no governed plan.");
+    // Re-validation against CURRENT policy: a policy edit between approval and execution refuses.
+    validateWritePlan(policy, plan);
+    const steps = compilePlan(plan, policy);
+    let vendorId: string | null = null;
+    let version: string | null = null;
+    try {
+      for (const step of steps) {
+        if (step.kind === "select") {
+          // Materialize the bounded SELECT through the READ role (RBAC), then bind the returned
+          // rows into the approved INSERT. The subquery never executes inside the write.
+          const read = await api.request({ statement: step.compiled.sql, timeout: 60, requestId, database: record.target.split(".")[0].toUpperCase(), schema: record.target.split(".")[1].toUpperCase() });
+          const rows = (Array.isArray(read.rows) ? read.rows : []).slice(0, step.mutation.maxRows);
+          const insert = buildMaterializedInsertRows(step.mutation.target, step.mutation.columns, step.mutation.maxRows, rows, policy.writeFunctions);
+          evidence.push(`materialized:${rows.length}`);
+          const result = await write(insert.sql, insert.bindings);
+          vendorId = result.queryId; version = result.statementHandle ?? null;
+          continue;
+        }
+        const compiled = step.compiled;
+        // Advisory preflight for predicate mutations: refuse BEFORE the write when the count
+        // already exceeds the approved ceiling. The COUNT race is documented in the security review.
+        if (compiled.preflight) {
+          const pre = await api.request({ statement: compiled.preflight.sql, timeout: 30, bindings: compiled.preflight.bindings, database: record.target.split(".")[0].toUpperCase(), schema: record.target.split(".")[1].toUpperCase() });
+          const count = Number(Array.isArray(pre.rows) && pre.rows[0] ? pre.rows[0][0] : NaN);
+          if (Number.isFinite(count) && count > compiled.maxRows) {
+            throw new LocalRefusal(`Preflight count ${count} exceeds the approved ceiling ${compiled.maxRows}; narrow the predicate.`);
+          }
+          evidence.push(`preflight:${count}`);
+        }
+        const result = await write(compiled.sql, compiled.bindings);
+        vendorId = result.queryId; version = result.statementHandle ?? null;
+      }
+    } catch (error) {
+      if (error instanceof LocalRefusal) throw error;
+      // Mid-plan failure with earlier statements already applied: surface the applied handles so
+      // the operator can reconcile — the attempt itself stays indeterminate.
+      if (evidence.length > 1) {
+        throw new Error(`Snowflake plan stopped after applying earlier statements (${evidence.join(", ").slice(0, 180)}): ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      }
+      throw error;
+    }
+    return { vendorId, version, evidenceIds: evidence };
   }
 
   async rejectAction(actionId: number): Promise<void> {
@@ -265,10 +400,6 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
     return this.#stage.stage(action, subject);
   }
 
-  async markActionPending(actionId: number): Promise<void> {
-    await this.#stage.markPending(actionId);
-  }
-
   async discardStagedAction(actionId: number): Promise<void> {
     await this.#stage.discardStaged(actionId);
   }
@@ -276,8 +407,18 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
   async findActionByProposalId(proposalId: string): Promise<SnowflakeWriteProposal | null> {
     const record = await this.#stage.findByProposalId(proposalId);
     if (!record) return null;
-    // Honest state: once the executor has applied the DML it is no longer simulated.
-    return { proposalId, actionId: record.actionId, operation: record.operation, target: record.target, sql: record.sql, simulated: record.state !== "approved" };
+    // Honest state: "simulated" until the execution journal holds a settled success — a recorded
+    // approval decision alone does not mean the statement ran.
+    const settled = await this.#journal.status(record.actionId);
+    return {
+      proposalId,
+      actionId: record.actionId,
+      operation: record.operation,
+      target: record.target,
+      sql: record.sourceSql ?? record.operatorSql ?? record.summary ?? "",
+      planSummary: record.summary,
+      simulated: settled !== "succeeded",
+    };
   }
 }
 @validateRpc() class SessionImpl extends RpcTarget implements SnowflakeSession {
@@ -399,28 +540,63 @@ type StoredSnowflakeAction = StageRecord<SnowflakeWriteAction>;
   async runCortexAgent(_r: CortexAgentRequest): Promise<CortexAgentResult> { throw new Error("Cortex Agent is disabled until recursion and target allowlists are configured."); }
   async listCustomTools() { await this.queue.authorizeObservation({ title: "Read Snowflake custom tools", description: "Read the configured custom-tool allowlist." }); return cursor<CustomToolSummary>([]); }
   async runCustomTool(_r: CustomToolRequest): Promise<CustomToolResult> { throw new Error("Custom Snowflake tools are disabled until individually allowlisted and schema-validated."); }
-  async proposeWrite(operation: "insert" | "update" | "merge", target: string, sql: string): Promise<SnowflakeWriteProposal> {
+  async proposeWrite(operation: SnowflakeWriteOperation | ("insert" | "update" | "merge"), target: string, sql: string): Promise<SnowflakeWriteProposal> {
     const p = this.policy();
-    const table = validateWriteProposal(p, operation, target, sql).table;
-    const payload: SnowflakeWriteAction = { proposalId: crypto.randomUUID(), operation, target: table, sql };
+    // Parse-or-refuse: the model keeps SQL as its dialect, but only statements that compile to
+    // the governed plan are accepted. The parsed plan — not the string — is what is approved,
+    // journaled, and re-compiled at execution.
+    const parsed = parseWriteSql(sql, p.writeFunctions);
+    if (typeof operation === "string" && operation !== parsed.operation && parsed.operation !== "plan") {
+      throw new LocalRefusal(`The stated operation ${operation} does not match the parsed statement (${parsed.operation}).`);
+    }
+    const normalized = (parsed.operation === "plan" ? parsed : { ...parsed, target: (parsed as { target: string }).target });
+    if (typeof operation === "string" && parsed.operation !== "plan" && (parsed as { target: string }).target !== target.toUpperCase()) {
+      throw new LocalRefusal("The stated target does not match the statement target; the parsed statement is the authority.");
+    }
+    void normalized;
+    return this.#submitPlan(parsed, sql, p);
+  }
+
+  async proposePlan(plan: WritePlan): Promise<SnowflakeWriteProposal> {
+    // Validate at proposal time with the same authority the executor re-runs: a proposal that
+    // would be refused at execution is refused here.
+    const p = this.policy();
+    validateWritePlan(p, plan);
+    return this.#submitPlan(plan, undefined, p);
+  }
+
+  async #submitPlan(plan: WritePlan, sourceSql: string | undefined, p: ReturnType<SessionImpl["policy"]>): Promise<SnowflakeWriteProposal> {
+    const mutations = plan.operation === "plan" ? plan.steps.map((s) => s.mutation) : [plan];
+    const primary = mutations[0];
+    const summary = describePlan(plan);
+    const operation: SnowflakeWriteOperation = plan.operation === "plan" ? "plan" : primary.operation;
+    const payload: SnowflakeWriteAction = {
+      proposalId: crypto.randomUUID(),
+      source: "plan",
+      operation,
+      target: primary.target,
+      plan,
+      summary,
+      ...(sourceSql === undefined ? {} : { sourceSql }),
+    };
     // The DO binds the trusted subject (owner/account/policy/expiry) at staging time.
     const { actionId } = await proposeAction(this.gatekeeper, this.queue, payload, {
-      title: `Snowflake ${operation.toUpperCase()} on ${table}`,
+      title: `Snowflake ${operation.toUpperCase()} on ${primary.target}`,
       description: [
-        `Propose a **${operation.toUpperCase()}** against Snowflake table \`${table}\`.`,
+        `Propose a governed write against Snowflake table \`${primary.target}\`.`,
         "",
-        "The statement below has not been executed. It will run only if this action is approved.",
+        summary,
         "",
-        "```sql",
-        sql,
-        "```",
-      ].join("\n"),
+        sourceSql === undefined
+          ? "The plan above has not been executed. It will run only if this action is approved."
+          : "The parsed plan above (from the proposed SQL) has not been executed. It will run only if this action is approved.",
+      ].join(String.fromCharCode(10)),
       implementsRevert: false,
       // Snowflake writes are not simulated: reads cannot reflect pending DML, so the agent must
       // not keep working against pre-write state.
       awaitDecision: true,
     });
-    return { ...payload, actionId, simulated: true };
+    return { proposalId: payload.proposalId, actionId, operation, target: payload.target, sql: sourceSql ?? "", planSummary: summary, simulated: true };
   }
   async getWriteProposal(proposalId: string): Promise<SnowflakeWriteProposal | null> {
     return this.gatekeeper.findActionByProposalId(proposalId);

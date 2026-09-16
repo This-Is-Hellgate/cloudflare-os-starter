@@ -208,11 +208,37 @@ export interface SnowflakeWriteProposal {
   proposalId: string;
   /** Sequential, Gatekeeper-assigned action id; the id the approval flow will call back with. */
   actionId: number;
-  operation: "insert" | "update" | "merge";
+  operation: SnowflakeWriteOperation;
   target: string;
+  /** The model's original SQL when the proposal came through proposeWrite; display only. */
   sql: string;
+  /** Semantics-first rendering of the approved plan, shown in the approval queue. */
+  planSummary?: string;
   simulated: boolean;
 }
+export interface SnowflakeWriteOperationBase { /** Exactly DATABASE.SCHEMA.TABLE, checked against the operator allowlist. */ target: string; /** Affected-row ceiling; 1-100000. Predicate mutations additionally get an advisory COUNT(*) preflight. */ maxRows: number; }
+export type SnowflakeScalar = string | number | boolean | null;
+export interface SnowflakeLiteral { kind: "literal"; value: SnowflakeScalar }
+export interface SnowflakeColumnRef { kind: "column"; name: string; /** In a MERGE, true refers to the bound source rows. */ source?: boolean }
+export interface SnowflakeBinaryExpr { kind: "binary"; op: "+" | "-" | "*" | "/" | "%" | "||"; left: SnowflakeWriteExpr; right: SnowflakeWriteExpr }
+export interface SnowflakeCallExpr { kind: "call"; fn: string; args: SnowflakeWriteExpr[] }
+export interface SnowflakeCaseExpr { kind: "case"; whens: { when: SnowflakeWritePred; result: SnowflakeWriteExpr }[]; else?: SnowflakeWriteExpr }
+export type SnowflakeWriteExpr = SnowflakeLiteral | SnowflakeColumnRef | SnowflakeBinaryExpr | SnowflakeCallExpr | SnowflakeCaseExpr;
+export interface SnowflakeComparePred { kind: "compare"; op: "=" | "!=" | "<" | "<=" | ">" | ">="; left: SnowflakeWriteExpr; right: SnowflakeWriteExpr }
+export interface SnowflakeNullPred { kind: "nullCheck"; expr: SnowflakeWriteExpr; negated: boolean }
+export interface SnowflakeInPred { kind: "in"; expr: SnowflakeWriteExpr; values: SnowflakeScalar[] }
+export interface SnowflakeGroupPred { kind: "and" | "or"; parts: SnowflakeWritePred[] }
+export interface SnowflakeNotPred { kind: "not"; part: SnowflakeWritePred }
+export type SnowflakeWritePred = SnowflakeComparePred | SnowflakeNullPred | SnowflakeInPred | SnowflakeGroupPred | SnowflakeNotPred;
+export interface SnowflakeInsertPlan extends SnowflakeWriteOperationBase { operation: "insert"; columns: string[]; rows: SnowflakeWriteExpr[][]; }
+export interface SnowflakeUpdatePlan extends SnowflakeWriteOperationBase { operation: "update"; assignments: { column: string; value: SnowflakeWriteExpr }[]; /** Required; empty update predicates are refused. */ where: SnowflakeWritePred; }
+export interface SnowflakeDeletePlan extends SnowflakeWriteOperationBase { operation: "delete"; /** Required; unconditional deletes are refused. */ where: SnowflakeWritePred; }
+export interface SnowflakeMergePlan extends SnowflakeWriteOperationBase { operation: "merge"; source: { columns: string[]; rows: SnowflakeWriteExpr[][] }; on: SnowflakeWritePred; matched?: { assignments: { column: string; value: SnowflakeWriteExpr }[] }; notMatched?: { columns: string[]; values: SnowflakeWriteExpr[] }; }
+export interface SnowflakeInsertSelectPlan extends SnowflakeWriteOperationBase { operation: "insert_select"; columns: string[]; /** Bounded SELECT, materialized through the read role first; the subquery never runs inside the write. */ select: string; maxBytes: number; }
+export interface SnowflakeMultiStepPlan { operation: "plan"; steps: { mutation: SnowflakeWriteMutation }[]; }
+export type SnowflakeWriteMutation = SnowflakeInsertPlan | SnowflakeUpdatePlan | SnowflakeDeletePlan | SnowflakeMergePlan | SnowflakeInsertSelectPlan;
+export type SnowflakeWritePlan = SnowflakeWriteMutation | SnowflakeMultiStepPlan;
+export type SnowflakeWriteOperation = SnowflakeWriteMutation["operation"] | "plan" | "operator_sql";
 
 export interface SnowflakeSession {
   /** Return only the account identity and effective role, never credentials. */
@@ -240,7 +266,10 @@ export interface SnowflakeSession {
    */
   runCustomTool(request: CustomToolRequest): Promise<CustomToolResult>;
   /** Queue a bounded DML proposal; it is never sent to Snowflake during this call. */
-  proposeWrite(operation: "insert" | "update" | "merge", target: string, sql: string): Promise<SnowflakeWriteProposal>;
+  /** Queue a bounded write from SQL text: parsed against the governed grammar; anything it cannot certify is refused. Never sent to Snowflake during this call. */
+  proposeWrite(operation: SnowflakeWriteOperation, target: string, sql: string): Promise<SnowflakeWriteProposal>;
+  /** Queue a governed write plan (typed structured surface; same approval and journal as proposeWrite). */
+  proposePlan(plan: SnowflakeWritePlan): Promise<SnowflakeWriteProposal>;
   /** Read the durable state of a previously proposed write, or null when unknown. */
   getWriteProposal(proposalId: string): Promise<SnowflakeWriteProposal | null>;
 }`;

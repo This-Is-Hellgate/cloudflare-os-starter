@@ -53,6 +53,8 @@ export type StageRecord<P> = P & {
   quarantined?: boolean;
   payloadHash?: string;
   subject?: import("./contracts.js").ApprovalSubject;
+  /** Governance provenance recorded at decision time (e.g. "preauthorized:pattern-name"). */
+  provenance?: string;
 };
 
 /**
@@ -185,6 +187,19 @@ export class Stage<P extends { proposalId: string }> {
    */
   async markApproved(actionId: number): Promise<StageRecord<P>> {
     return this.decide(actionId, "approved");
+  }
+
+  /**
+   * Attaches governance metadata to a NON-TERMINAL record — preauthorization provenance, for
+   * example. Terminal records are refused: a decided action's evidence is immutable.
+   */
+  async annotate(actionId: number, fields: { provenance?: string }): Promise<void> {
+    const record = await this.require(actionId);
+    if (record.state === "approved" || record.state === "rejected" || record.state === "expired") {
+      throw new Error(`${this.#label} action ${actionId} is terminal and cannot be annotated.`);
+    }
+    Object.assign(record, fields);
+    await this.#kv.put(`${LIVE_PREFIX}${actionId}`, record);
   }
 
   /** Looks up a record across live and retired storage. */

@@ -11,6 +11,10 @@ interface Env {
   SNOWFLAKE_SCHEMAS?: string;
   SNOWFLAKE_TABLES?: string;
   SNOWFLAKE_WAREHOUSE?: string;
+  /** Optional write-path role: when set, approved writes run under it instead of SNOWFLAKE_ROLE. */
+  SNOWFLAKE_WRITE_ROLE?: string;
+  /** Optional write-path warehouse, overriding SNOWFLAKE_WAREHOUSE for approved writes. */
+  SNOWFLAKE_WRITE_WAREHOUSE?: string;
   SNOWFLAKE_BASE_URL?: string;
   SNOWFLAKE_MAX_ROWS?: string;
   SNOWFLAKE_MAX_BYTES?: string;
