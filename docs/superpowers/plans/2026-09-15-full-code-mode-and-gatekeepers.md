@@ -357,11 +357,11 @@ expect(await h.status(ref)).toBe("succeeded");
 
 **Modify:** `scripts/deployment-config.ts`, `scripts/deploy.ts`, `scripts/deploy.test.ts`, `deployment.jsonc`, `docs/gatekeeper-catalog.md`, `README.md`.
 
-- [ ] Extend catalog metadata with `publicFlow: boolean`, optional Router prefix, configuration schema, secret contract, and package entrypoint. Workshop service bindings and Router HTTP bindings are separate decisions.
-- [ ] Wire `github`, `confluence`, `cloudflare`, `mcp`, and `mcpPortal` from their actual upstream Wrangler/deploy-inputs contracts; retain each package's required bindings, DO migrations, and compatibility flags.
-- [ ] Keep the user's Snowflake setting intact. New entries default disabled. An enabled unsupported/incomplete contract fails generation.
-- [ ] Preserve GitHub/Confluence OAuth per-user account scopes. Cloudflare here remains telemetry/billing integration, not infrastructure control. MCP endpoints stay explicitly scoped; portal trust annotations are operator policy, never accepted from model input.
-- [ ] Keep control/runtime/factory Workers out of Router discovery entirely. Their eventual catalog records use `publicFlow: false`.
+- [x] Extend catalog metadata with `publicFlow: boolean`, optional Router prefix, configuration schema, secret contract, and package entrypoint. Workshop service bindings and Router HTTP bindings are separate decisions.
+- [x] Wire `github`, `confluence`, `cloudflare`, `mcp`, and `mcpPortal` from their actual upstream Wrangler/deploy-inputs contracts; retain each package's required bindings, DO migrations, and compatibility flags.
+- [x] Keep the user's Snowflake setting intact. New entries default disabled. An enabled unsupported/incomplete contract fails generation.
+- [x] Preserve GitHub/Confluence OAuth per-user account scopes. Cloudflare here remains telemetry/billing integration, not infrastructure control. MCP endpoints stay explicitly scoped; portal trust annotations are operator policy, never accepted from model input.
+- [x] Keep control/runtime/factory Workers out of Router discovery entirely. Their eventual catalog records use `publicFlow: false`.
 
 **Focused verification:** extend the existing generated-service-graph test as a data-driven catalog fixture. Assert enabled/disabled behavior, exact secret ownership, and no Router binding for service-only packages.
 
