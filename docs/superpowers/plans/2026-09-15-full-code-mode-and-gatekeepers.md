@@ -436,12 +436,6 @@ Before P4, enforce compute reservations in the NVIDIA account DO using an operat
 
 ### Task 3.2: One shared integration harness and M1 proof
 
-> **DEFERRED (September 15, operator decision):** the M1 harness proof is skipped for now — P4
-> proceeds first. The five scenarios (A-E) and the M1 gate remain required before any M2
-> acceptance or live deployment; the harness will be built as a thin consumer of upstream
-> `@gadgets/integration-tests` when this task resumes. Risk accepted: M1 composition is unproven
-> until then.
-
 **Extend the package introduced in Task 1.1:** `packages/operating-environment-tests/package.json`, `vite.config.ts`, `vitest.config.ts`, `src/harness.ts`, `src/composition.test.ts`.
 
 - [ ] Build a workerd/Worker integration harness that uses real outer Gatekeeper/session implementations, real Stage storage, and controlled vendor HTTP fixtures. Reuse pinned upstream test utilities only through supported exports; do not copy their full harness.
