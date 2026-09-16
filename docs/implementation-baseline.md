@@ -14,6 +14,10 @@ conversation or any external file.
 | Dirty paths at baseline | `deployment.jsonc` (modified: Snowflake enabled with worker name `hellgate-os-gatekeeper-snowflake`); untracked `.deploy-log.txt` (empty) and `docs/superpowers/` |
 | Tracked file named `-` | Present at repo root; unrelated cleanup candidate, excluded from this program |
 | Baseline proposal commit | `dcc64f2a7e036258a59e7807757b17b86d34a880` — **not retrievable** from this checkout (`git cat-file -t` fails; not an ancestor of HEAD). Ancestry/diff against the original proposal is therefore **not established**; do not assume it. |
+>
+> **Resolved September 15:** the original baseline commit surfaced on the personal remote and was
+> merged into `main` (`613539f`); ancestry is now established. It adds only the original
+> `.github/workflows/verify.yml`. |
 
 ## Toolchain
 
