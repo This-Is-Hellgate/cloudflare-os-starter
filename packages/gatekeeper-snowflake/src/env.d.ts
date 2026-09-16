@@ -11,6 +11,12 @@ interface Env {
   SNOWFLAKE_SCHEMAS?: string;
   SNOWFLAKE_TABLES?: string;
   SNOWFLAKE_WAREHOUSE?: string;
+  /**
+   * Dedicated write credential for approved writes. The secrets contract requires it whenever
+   * write authority is enabled (SNOWFLAKE_ENABLE_WRITES); reusing the read token is the
+   * operator's explicit choice and presumes its scope was checked.
+   */
+  SNOWFLAKE_WRITE_TOKEN?: string;
   /** Optional write-path role: when set, approved writes run under it instead of SNOWFLAKE_ROLE. */
   SNOWFLAKE_WRITE_ROLE?: string;
   /** Optional write-path warehouse, overriding SNOWFLAKE_WAREHOUSE for approved writes. */

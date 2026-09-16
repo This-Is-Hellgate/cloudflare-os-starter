@@ -73,8 +73,8 @@ class SnowflakeApi {
   #base(): string {
     return (this.env.SNOWFLAKE_BASE_URL ?? `https://${this.env.SNOWFLAKE_ACCOUNT}.snowflakecomputing.com`).replace(/\/$/, "");
   }
-  async #post(path: string, body: Record<string, unknown>, label: string): Promise<any> {
-    const response = await fetch(`${this.#base()}${path}`, { method: "POST", headers: { authorization: `Bearer ${this.env.SNOWFLAKE_TOKEN}`, "content-type": "application/json", accept: "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+  async #post(path: string, body: Record<string, unknown>, label: string, token: string = this.env.SNOWFLAKE_TOKEN): Promise<any> {
+    const response = await fetch(`${this.#base()}${path}`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
     if (!response.ok) throw new Error(`${label} failed (${response.status}).`);
     return response.json();
   }
@@ -83,15 +83,18 @@ class SnowflakeApi {
   // active role, so it must actually govern what runs rather than falling back to the
   // credential's default role. Writes go through requestAsWrite(): the optional
   // SNOWFLAKE_WRITE_ROLE/SNOWFLAKE_WRITE_WAREHOUSE split read and write authority.
-  async #run(body: Record<string, unknown>, role: string, warehouse?: string) {
-    const data = await this.#post("/api/v2/statements", { ...body, role, ...(warehouse ? { warehouse } : {}) }, "Snowflake request");
+  async #run(body: Record<string, unknown>, role: string, warehouse: string | undefined, token: string) {
+    const data = await this.#post("/api/v2/statements", { ...body, role, ...(warehouse ? { warehouse } : {}) }, "Snowflake request", token);
     return this.#resultSet(data);
   }
   async request(body: Record<string, unknown>) {
-    return this.#run(body, this.env.SNOWFLAKE_ROLE, this.env.SNOWFLAKE_WAREHOUSE);
+    return this.#run(body, this.env.SNOWFLAKE_ROLE, this.env.SNOWFLAKE_WAREHOUSE, this.env.SNOWFLAKE_TOKEN);
   }
   async requestAsWrite(body: Record<string, unknown>) {
-    return this.#run(body, this.env.SNOWFLAKE_WRITE_ROLE ?? this.env.SNOWFLAKE_ROLE, this.env.SNOWFLAKE_WRITE_WAREHOUSE ?? this.env.SNOWFLAKE_WAREHOUSE);
+    // The write path prefers the dedicated write credential (SNOWFLAKE_WRITE_TOKEN) and falls
+    // back to the read token only when the operator explicitly reuses it — the secrets contract
+    // requires the operator to provide the write token whenever write authority is enabled.
+    return this.#run(body, this.env.SNOWFLAKE_WRITE_ROLE ?? this.env.SNOWFLAKE_ROLE, this.env.SNOWFLAKE_WRITE_WAREHOUSE ?? this.env.SNOWFLAKE_WAREHOUSE, this.env.SNOWFLAKE_WRITE_TOKEN ?? this.env.SNOWFLAKE_TOKEN);
   }
 
   /** Normalizes one ResultSet response, including the verified partition metadata. */

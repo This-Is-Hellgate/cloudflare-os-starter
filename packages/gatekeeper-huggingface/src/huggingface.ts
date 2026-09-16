@@ -6,6 +6,7 @@ import TYPES_CODE from "./types-code.js";
 import { Stage, GatedActions, ExecutionJournal, proposeAction, type StageRecord } from "@gadgets/stage";
 import type { ActionRef, ApprovalSubject, ExecutionAttempt, ReceiptInput } from "@gadgets/stage";
 import { LivePageSource, offsetPaged, type LivePage } from "@gadgets/cursor";
+import { capOutput, fitRowsToByteBudget, streamTextCapped } from "./limits.js";
 import {
   NDJSON_CONTENT_TYPE,
   buildCommitNdjson,
@@ -53,15 +54,31 @@ function apiPath(resource: Resource, suffix = ""): string { return `https://hugg
 function boundedString(value: string, max: number, name: string): string { if (value.length > max) throw new Error(`${name} exceeds the ${max}-character limit.`); return value; }
 function boundedInt(value: number | undefined, fallback: number, max: number): number { const n = value ?? fallback; if (!Number.isInteger(n) || n < 1 || n > max) throw new Error("Requested limit is outside the allowed bound."); return n; }
 function writesEnabled(env: Env): boolean { return env.HF_ENABLE_WRITES === "true" || env.HF_ENABLE_WRITES === "1"; }
-function capOutput(value: unknown, maxBytes = 256_000): { output: unknown; truncated: boolean } { const text = JSON.stringify(value) ?? "null"; if (text.length <= maxBytes) return { output: value, truncated: false }; return { output: text.slice(0, maxBytes), truncated: true }; }
+
 
 class HubClient {
   constructor(private readonly token: string) { if (!token) throw new Error("Hugging Face credentials are not configured."); }
+  #headers(extra?: HeadersInit): Headers {
+    const headers = new Headers(extra);
+    headers.set("Authorization", `Bearer ${this.token}`);
+    headers.set("Accept", "application/json");
+    return headers;
+  }
   async request(url: string, init: RequestInit = {}): Promise<any> {
-    const headers = new Headers(init.headers); headers.set("Authorization", `Bearer ${this.token}`); headers.set("Accept", "application/json");
-    const response = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(30_000) });
+    const response = await fetch(url, { ...init, headers: this.#headers(init.headers), signal: AbortSignal.timeout(30_000) });
     if (!response.ok) { if ([401, 403, 404].includes(response.status)) throw new Error(`Hugging Face resource is not accessible (${response.status}).`); throw new Error(`Hugging Face request failed (${response.status}).`); }
     return response.headers.get("content-type")?.includes("json") ? response.json() : response.text();
+  }
+
+  /**
+   * Streams a text response with a HARD byte ceiling: reading stops (the stream is cancelled)
+   * once the cap is crossed, so an oversized file is never fully buffered. The bound mechanics
+   * are the tested pure helper in limits.ts.
+   */
+  async readTextCapped(url: string, maxBytes: number): Promise<string> {
+    const response = await fetch(url, { headers: this.#headers(), signal: AbortSignal.timeout(30_000) });
+    if (!response.ok) { if ([401, 403, 404].includes(response.status)) throw new Error(`Hugging Face resource is not accessible (${response.status}).`); throw new Error(`Hugging Face request failed (${response.status}).`); }
+    return streamTextCapped(response, maxBytes);
   }
 }
 
@@ -75,6 +92,9 @@ class HubClient {
 class HubCursor<T> extends RpcTarget {
   constructor(private readonly source: LivePageSource<T>) { super(); }
   next(): Promise<T[] | null> { return this.source.next(); }
+  // Deterministic resource release: disposing the capability ends its lifetime (later walks
+  // refuse), whether the agent finished, timed out, or was cancelled.
+  [Symbol.dispose](): void { this.source.close(); }
 }
 
 /** Verified datasets-server paging constants: rows are fetched in windows of at most 100. */
@@ -115,6 +135,7 @@ class DatasetPagesCursor extends RpcTarget implements DatasetQueryPages {
   next(): Promise<DatasetPage | null> { return this.source.next().then((pages) => pages?.[0] ?? null); }
   getColumns(): Promise<string[]> { return Promise.resolve(this.columns()); }
   getTotalRows(): Promise<number> { return Promise.resolve(this.totalRows()); }
+  [Symbol.dispose](): void { this.source.close(); }
 }
 
 @validateRpc()
@@ -299,7 +320,7 @@ class HuggingFaceSessionImpl extends RpcTarget implements HuggingFaceSession {
   async getDatasetInfo(): Promise<HuggingFaceDatasetInfo> { const r = this.#resource(); if (r.kind !== "dataset") throw new Error("The bound resource is not a dataset."); const d = await this.#client().request(apiPath(r)); await this.queue.authorizeObservation({ title: "Read Hugging Face dataset metadata", description: `Read bounded metadata for ${r.id}.` }); return { id: d.id ?? r.id, tags: Array.isArray(d.tags) ? d.tags.slice(0, 100) : [], gated: Boolean(d.gated), private: Boolean(d.private), description: typeof d.description === "string" ? d.description.slice(0, 4000) : undefined }; }
   async getSpaceInfo(): Promise<HuggingFaceSpaceInfo> { const r = this.#resource(); if (r.kind !== "space") throw new Error("The bound resource is not a Space."); const d = await this.#client().request(apiPath(r)); await this.queue.authorizeObservation({ title: "Read Hugging Face Space metadata", description: `Read bounded metadata for ${r.id}.` }); return { id: d.id ?? r.id, sdk: d.sdk, runtime: d.runtime?.stage, private: Boolean(d.private), stage: d.stage }; }
   async listFiles(path?: string, revision?: string): Promise<HuggingFaceFilePage> { const r = this.#resource(); const clean = (path ?? "").replace(/^\/+/, ""); if (clean.includes("..") || clean.length > 512) throw new Error("Invalid repository path."); const rev = validateRevision(revision); const d = await this.#client().request(apiPath(r, `/tree/${encodeURIComponent(rev)}?path=${encodeURIComponent(clean)}&recursive=false&limit=100`)); await this.queue.authorizeObservation({ title: "List Hugging Face files", description: `List bounded paths under ${r.id}.` }); return { entries: (Array.isArray(d) ? d : []).slice(0, 100).map((x: any) => ({ path: String(x.path).slice(0, 512), size: typeof x.size === "number" ? x.size : undefined, type: x.type === "directory" ? "directory" : "file", lfs: x.lfs && { oid: String(x.lfs.oid), size: Number(x.lfs.size) } })), truncated: Array.isArray(d) && d.length >= 100 }; }
-  async readTextFile(path: string, revision = "main", maxBytes = 256_000): Promise<string> { if (path.includes("..") || path.startsWith("/") || path.length > 512 || maxBytes < 1 || maxBytes > 1_000_000) throw new Error("Invalid bounded file request."); const r = this.#resource(); const rev = validateRevision(revision); const d = await this.#client().request(`https://huggingface.co/${r.kind === "model" ? "" : `${r.kind}s/`}${r.id}/resolve/${encodeURIComponent(rev)}/${path}`); const text = String(d); await this.queue.authorizeObservation({ title: "Read Hugging Face text file", description: `Read a bounded text file from ${r.id}.` }); return text.slice(0, maxBytes); }
+  async readTextFile(path: string, revision = "main", maxBytes = 256_000): Promise<string> { if (path.includes("..") || path.startsWith("/") || path.length > 512 || maxBytes < 1 || maxBytes > 1_000_000) throw new Error("Invalid bounded file request."); const r = this.#resource(); const rev = validateRevision(revision); const text = await this.#client().readTextCapped(`https://huggingface.co/${r.kind === "model" ? "" : `${r.kind}s/`}${r.id}/resolve/${encodeURIComponent(rev)}/${path}`, maxBytes); await this.queue.authorizeObservation({ title: "Read Hugging Face text file", description: `Read a bounded text file from ${r.id}.` }); return text; }
   async queryDataset(options?: DatasetQueryOptions): Promise<DatasetQueryResult> {
     const r = this.#resource();
     if (r.kind !== "dataset") throw new Error("Dataset queries require a bound dataset.");
@@ -315,11 +336,12 @@ class HuggingFaceSessionImpl extends RpcTarget implements HuggingFaceSession {
       ? features.slice(0, 200).map((f: any) => String(f?.name ?? "")).filter(Boolean)
       : firstRow && typeof firstRow === "object" ? Object.keys(firstRow).slice(0, 200) : [];
     const rows: unknown[][] = rawRows.map((x: any) => { const obj = (x?.row ?? x) as Record<string, unknown> | undefined; return columns.map((c: string) => obj?.[c]); });
-    let truncated = Number((d as any)?.num_rows_total ?? 0) > rows.length;
-    // Enforce the byte budget by dropping whole rows rather than truncating mid-value.
-    while (rows.length > 1 && JSON.stringify(rows).length > maxBytes) { rows.pop(); truncated = true; }
+    // Enforce the UTF-8 byte budget by dropping whole rows rather than truncating mid-value.
+    const fitted = fitRowsToByteBudget(rows, maxBytes);
+    const keptRows = fitted.kept;
+    const truncated = fitted.truncated || Number((d as any)?.num_rows_total ?? 0) > keptRows.length;
     await this.queue.authorizeObservation({ title: "Query Hugging Face dataset", description: `Read bounded rows from ${r.id} (${cfg}/${spl}).` });
-    return { columns, rows, rowCount: rows.length, truncated };
+    return { columns, rows: keptRows, rowCount: keptRows.length, truncated };
   }
 
   /**
@@ -363,15 +385,15 @@ class HuggingFaceSessionImpl extends RpcTarget implements HuggingFaceSession {
       const raw = Array.isArray((d as any)?.rows) ? (d as any).rows : [];
       fetchedLastWindow = raw.length;
       const rows: unknown[][] = raw.map((x: any) => { const obj = (x?.row ?? x) as Record<string, unknown> | undefined; return (columns ?? []).map((c: string) => obj?.[c]); });
-      // Cumulative byte budget: whole rows are dropped rather than truncated mid-value, and the
-      // page reports honestly when the budget clipped it.
-      let truncated = false;
-      while (rows.length > 0 && JSON.stringify(rows).length > bytesBudget) { rows.pop(); truncated = true; }
-      const encoded = JSON.stringify(rows).length;
-      bytesBudget -= encoded;
-      rowsBudget -= rows.length;
+      // Cumulative UTF-8 byte budget: whole rows are dropped rather than truncated mid-value, and
+      // the page reports honestly when the budget clipped it.
+      const fitted = fitRowsToByteBudget(rows, bytesBudget);
+      const kept = fitted.kept;
+      const truncated = fitted.truncated;
+      bytesBudget -= new TextEncoder().encode(JSON.stringify(kept)).byteLength;
+      rowsBudget -= kept.length;
       offset += fetchedLastWindow;
-      const page: DatasetPage = { rows, rowCount: rows.length, offset: offset - fetchedLastWindow, truncated };
+      const page: DatasetPage = { rows: kept, rowCount: kept.length, offset: offset - fetchedLastWindow, truncated };
       const exhausted = rows.length === 0 || fetchedLastWindow < length || offset >= totalRows || rowsBudget <= 0 || bytesBudget <= 0;
       return { items: [page], exhausted };
     };

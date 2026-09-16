@@ -96,15 +96,19 @@ export function partitionPager(
     // drops are discarded from the buffer, never re-sliced on a later page.
     let rows = buffer.slice(0, options.rowsPerPage);
     buffer = buffer.slice(rows.length);
-    // Cumulative byte budget: whole rows are dropped rather than truncated mid-value, matching
-    // the single-shot form's honest clipping.
-    let truncated = false;
-    while (rows.length > 0 && deliveredBytes + JSON.stringify(rows).length > options.maxBytes) {
-      rows = rows.slice(0, -1);
-      truncated = true;
+    // Cumulative UTF-8 byte budget: whole rows are dropped rather than truncated mid-value,
+    // matching the single-shot form's honest clipping. Rows are encoded once per page.
+    const encoder = new TextEncoder();
+    const rowBytes = rows.map((row) => encoder.encode(JSON.stringify(row)).byteLength + 1);
+    const fits = (count: number): number => rowBytes.slice(0, count).reduce((a, b) => a + b, 0);
+    let kept = rows.length;
+    while (kept > 0 && deliveredBytes + fits(kept) > options.maxBytes) {
+      kept -= 1;
     }
+    const truncated = kept < rows.length;
+    rows = rows.slice(0, kept);
     deliveredRows += rows.length;
-    deliveredBytes += JSON.stringify(rows).length;
+    deliveredBytes += fits(kept);
     const page: ReadOnlySqlPage = {
       rows,
       rowCount: rows.length,

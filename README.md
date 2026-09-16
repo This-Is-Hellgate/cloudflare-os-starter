@@ -76,6 +76,7 @@ Your account needs [Workers](https://developers.cloudflare.com/workers/), [KV](h
 Supported development and CI environments are **Windows and Linux** (`.github/workflows/ci.yml` runs both). The deploy scripts are TypeScript run directly by `node`.
 
 `node scripts/deploy.ts` (and `pnpm check`) read `deployment.jsonc` by default; pass `--config <path>` to validate and dry-run a different configuration file that lives inside this repository — for example the non-secret CI fixture:
+First-deploy secrets install per Worker from `.secrets/<workerName>.json` with strict contract validation — see [docs/deployment-secrets.md](docs/deployment-secrets.md); add `--with-secrets` to a deploy to install them before the Workers go out.
 
 ```sh
 node scripts/deploy.ts --check --config scripts/deployment.ci.jsonc

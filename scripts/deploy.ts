@@ -7,6 +7,7 @@ import { parse, printParseErrorCode, type ParseError } from "jsonc-parser";
 import { pnpmCommand } from "../cloudflare-os/scripts/pnpm-command.ts";
 import { resolveBinEntry } from "../cloudflare-os/scripts/bin-entry.ts";
 import { AI_GATEWAY_PROVIDERS, GATEKEEPER_REQUIRED_SECRETS, WIRED_GATEKEEPERS } from "./deployment-config.ts";
+import { installSecrets } from "./deployment-secrets.ts";
 import type {
   BaseConfigs,
   BuildCommand,
@@ -21,7 +22,7 @@ import { OPTIONAL_GATEKEEPER_CATALOG } from "./deployment-config.ts";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // One deployment per checkout; use separate worktrees for concurrent deploys.
 const generatedName = "wrangler.prod.jsonc";
-const packageDirs = {
+export const packageDirs = {
   router: "cloudflare-os/packages/router",
   workshop: "cloudflare-os/packages/workshop-backend",
   context: "cloudflare-os/packages/gatekeeper-context",
@@ -721,7 +722,7 @@ async function readDeployment(path: string): Promise<DeploymentConfig> {
   }
 }
 
-function runCommand(
+export function runCommand(
   command: string,
   argv: string[],
   cwd: string,
@@ -908,6 +909,13 @@ async function main(): Promise<void> {
     const check = process.argv.includes("--check");
     if (check) run(["test"]);
     build(config);
+    // Optional first-deploy secret installation: per-Worker contract validation, one temporary
+    // file per Worker outside the repository, the installed Wrangler's `secret bulk`. Draft
+    // Workers receive their credentials BEFORE the deploy so the first deploy succeeds. A dry
+    // run (`--check`) validates the contracts and installs nothing.
+    if (process.argv.includes("--with-secrets")) {
+      await installSecrets(root, config, { dryRun: Boolean(check) });
+    }
     const deployArgs = check ? ["--dry-run"] : [];
     if (config.errorReporting.enabled) {
       deployWorker(packageDirs.errorReporter, deployArgs);
