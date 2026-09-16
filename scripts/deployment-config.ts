@@ -18,6 +18,7 @@ export type AiGatewayProvider = "anthropic" | "openai" | "google" | "cloudflare"
 
 /** The optional external integrations this Starter can install as separate Gatekeeper Workers. */
 export type OptionalGatekeeperId =
+  | "nvidia"
   | "github"
   | "confluence"
   | "cloudflare"
@@ -35,7 +36,7 @@ export interface GatekeeperCatalogEntry {
   /** Public Router prefix; the Worker itself remains private behind the Router. */
   routePrefix: `/gatekeeper/${string}`;
   /** Credential/configuration shape; secrets are supplied separately at deploy time. */
-  auth: "oauth2" | "endpoint" | "portal" | "snowflake" | "huggingface";
+  auth: "oauth2" | "endpoint" | "portal" | "snowflake" | "huggingface" | "nvidia";
   /**
    * Whether the Router exposes an HTTP flow for this Gatekeeper (the `/gatekeeper/*` prefix,
    * OAuth redirects, frontend assets). `false` marks a SERVICE-ONLY package: the Workshop binds
@@ -58,6 +59,15 @@ export interface GatekeeperCatalogEntry {
  * it in a later change, after each package's bindings and secret contract have been reviewed.
  */
 export const OPTIONAL_GATEKEEPER_CATALOG: Record<OptionalGatekeeperId, GatekeeperCatalogEntry> = {
+  nvidia: {
+    packageDir: "packages/gatekeeper-nvidia",
+    binding: "GATEKEEPER_NVIDIA",
+    routePrefix: "/gatekeeper/nvidia",
+    auth: "nvidia",
+    publicFlow: true,
+    entrypoint: "GatekeeperVendor",
+    secrets: ["NVIDIA_API_KEY"],
+  },
   github: {
     packageDir: "cloudflare-os/packages/gatekeeper-github",
     binding: "GATEKEEPER_GITHUB",
@@ -161,7 +171,7 @@ export const AI_GATEWAY_PROVIDERS: readonly AiGatewayProvider[] =
  * half-wired.
  */
 export const WIRED_GATEKEEPERS: readonly OptionalGatekeeperId[] = [
-  "github", "confluence", "cloudflare", "mcpv2", "mcpPortal", "snowflake", "huggingface",
+  "nvidia", "github", "confluence", "cloudflare", "mcpv2", "mcpPortal", "snowflake", "huggingface",
 ];
 
 /**

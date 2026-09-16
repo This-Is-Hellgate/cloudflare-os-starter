@@ -116,7 +116,7 @@ export interface ImagePart {
  * byte ceilings are the boundary.
  */
 export function validateImagePart(raw: unknown, partIndex: number): ImagePart {
-  if (typeof raw !== "string") throw new Error(`Image part ${partIndex} must be a data-URI string.`);
+  if (typeof raw !== "string") throw new Error(`Image part ${partIndex} must be a base64 data URI (png, jpeg, webp, or gif).`);
   const match = DATA_URI.exec(raw);
   if (!match) throw new Error(`Image part ${partIndex} must be a base64 data URI (png, jpeg, webp, or gif).`);
   const [, , base64] = match;

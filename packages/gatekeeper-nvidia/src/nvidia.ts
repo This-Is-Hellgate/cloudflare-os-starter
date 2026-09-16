@@ -13,7 +13,7 @@ import type {
 import TYPES_CODE from "./types-code.js";
 import {
   allowedModel, boundedText, nvidiaPolicy, validateApiKey, validateImagePart, totalImageBudget,
-  MAX_EMBED_INPUTS, MAX_IMAGE_TOTAL_CHARS, MAX_OUTPUT_CHARS, MAX_OUTPUT_TOKENS, MAX_RERANK_CANDIDATES,
+  MAX_EMBED_INPUTS, MAX_OUTPUT_CHARS, MAX_OUTPUT_TOKENS, MAX_RERANK_CANDIDATES,
   MAX_TEXT_CHARS, type ComputeUsage, type NvidiaPolicy,
 } from "./policy.js";
 
@@ -243,7 +243,7 @@ class NvidiaSessionImpl extends RpcTarget implements NvidiaSession {
   async listModels(): Promise<NvidiaModelInfo[]> {
     const policy = nvidiaPolicy(this.env);
     const notes = this.gatekeeper.modelNotes();
-    const models = [...policy.allowedModels].sort();
+    const models = [...policy.allowedModels].toSorted();
     await this.queue.authorizeObservation({ title: "List NVIDIA models", description: `List the ${models.length} allowed NIM model(s).` });
     return models.map((id) => ({ id, description: notes.get(id) }));
   }

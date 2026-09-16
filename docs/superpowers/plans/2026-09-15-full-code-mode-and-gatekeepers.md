@@ -393,10 +393,10 @@ expect(await h.status(ref)).toBe("succeeded");
 **Create package:** `packages/gatekeeper-nvidia/` with `package.json`, `tsconfig.json`, `vite.config.ts`, `vitest.config.ts`, `wrangler.jsonc`, `SECURITY-REVIEW.md`; `src/index.ts`, `nvidia.ts`, `policy.ts`, `types.d.ts`, `types-code.ts`, `env.d.ts`.
 **Modify:** deployment catalog/generator/docs.
 
-- [ ] Follow the existing Gatekeeper account/resource/session pattern. Obtain models from a deployment allowlist, not arbitrary endpoint discovery.
-- [ ] Expose the full governed compute surface: `listModels`, `describeModel`, `infer`, `embed`, `rerank`, and multimodal inference/embedding. `infer` accepts typed text/chat messages and OpenAI-compatible image parts (data-URI base64); `embed` accepts string-array inputs and multimodal embedding requests; `rerank` accepts a query plus bounded candidate documents. Reject arbitrary URL, header, or provider JSON passthrough. Image-bearing parts carry per-part and total base64 byte ceilings, an image content-type policy, and image-aware budget pricing; image content is observation-gated and never stored beyond bounded evidence. Exact endpoint shapes, quotas, and pricing are verified at implementation time against NVIDIA's current documentation — not assumed.
-- [ ] Credential is `NVIDIA_API_KEY`; endpoint and allowed models are operator configuration. Default inference timeout 60 seconds, input 256 KiB UTF-8, output 1 MiB, 2 concurrent calls per account, and 8,192 maximum output tokens subject to stricter model limits.
-- [ ] Reserve compute budget, honor cancellation, bound streaming responses, and return typed usage with unknown cost represented explicitly.
+- [x] Follow the existing Gatekeeper account/resource/session pattern. Obtain models from a deployment allowlist, not arbitrary endpoint discovery.
+- [x] Expose the full governed compute surface: `listModels`, `describeModel`, `infer`, `embed`, `rerank`, and multimodal inference/embedding. `infer` accepts typed text/chat messages and OpenAI-compatible image parts (data-URI base64); `embed` accepts string-array inputs and multimodal embedding requests; `rerank` accepts a query plus bounded candidate documents. Reject arbitrary URL, header, or provider JSON passthrough. Image-bearing parts carry per-part and total base64 byte ceilings, an image content-type policy, and image-aware budget pricing; image content is observation-gated and never stored beyond bounded evidence. Exact endpoint shapes, quotas, and pricing are verified at implementation time against NVIDIA's current documentation — not assumed.
+- [x] Credential is `NVIDIA_API_KEY`; endpoint and allowed models are operator configuration. Default inference timeout 60 seconds, input 256 KiB UTF-8, output 1 MiB, 2 concurrent calls per account, and 8,192 maximum output tokens subject to stricter model limits.
+- [x] Reserve compute budget, honor cancellation, bound streaming responses, and return typed usage with unknown cost represented explicitly.
 
 Before P4, enforce compute reservations in the NVIDIA account DO using an operator-configured finite spend/call allowance. P4 adds the stricter shared task reservation in front of this account ceiling; the provider ceiling remains in force. This avoids making P3 depend on the later task runtime.
 
@@ -421,9 +421,9 @@ Before P4, enforce compute reservations in the NVIDIA account DO using an operat
 
 **Modify:** `packages/gatekeeper-huggingface/src/huggingface.ts`, `types.d.ts`, `types-code.ts`; existing suites.
 
-- [ ] Add bounded read-only `searchModels(query)` / `searchDatasets(query)` through the official Hub search API (fixed host, bounded result count, capped fields: id, task tags, downloads, likes, library). No arbitrary filter passthrough beyond a bounded allowlisted field set.
-- [ ] `getModelCard`/`getDatasetInfo` already bound a specific repo; discovery returns candidates only — binding still required before any session capability is minted.
-- [ ] Extend the session source-contract suite for the two methods; reuse the bounded-read pattern.
+- [x] Add bounded read-only `searchModels(query)` / `searchDatasets(query)` through the official Hub search API (fixed host, bounded result count, capped fields: id, task tags, downloads, likes, library). No arbitrary filter passthrough beyond a bounded allowlisted field set.
+- [x] `getModelCard`/`getDatasetInfo` already bound a specific repo; discovery returns candidates only — binding still required before any session capability is minted.
+- [x] Extend the session source-contract suite for the two methods; reuse the bounded-read pattern.
 
 **Acceptance:** the M2 tournament can discover candidate models through the governed surface instead of operator hand-listing; a search cannot widen what a session may touch.
 

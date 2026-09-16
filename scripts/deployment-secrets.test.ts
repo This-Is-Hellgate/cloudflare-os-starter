@@ -70,7 +70,8 @@ test("contract derivation covers enabled gatekeepers and the conditional Worksho
       customGatekeeper: { name: "cg" }, errorReporter: { name: "er" },
     },
     gatekeepers: {
-      github: { enabled: false, workerName: null },
+      nvidia: { enabled: false, workerName: null },
+    github: { enabled: false, workerName: null },
       confluence: { enabled: false, workerName: null },
       cloudflare: { enabled: false, workerName: null },
       mcpv2: { enabled: false, workerName: null },
